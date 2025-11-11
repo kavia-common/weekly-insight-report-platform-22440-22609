@@ -16,6 +16,7 @@ Read-only demo endpoints (in-memory):
 Supabase CRUD endpoints:
 - POST /api/reports
   - Body: { userId: string, weekOf: "YYYY-MM-DD", content?: string, blockers?: string, plans?: string }
+  - Field mapping: the request field "content" is stored in the database column "progress".
   - Returns 201 with created report.
 - GET /api/reports/:id
   - Returns 200 with report.
@@ -25,6 +26,7 @@ Supabase CRUD endpoints:
   - Response: { items: Report[], page, pageSize, total? }
 - PATCH /api/reports/:id
   - Body: { weekOf?: "YYYY-MM-DD", content?: string, blockers?: string, plans?: string }
+  - Field mapping: "content" in the request updates the database "progress" column.
   - Returns 200 with updated report.
 - DELETE /api/reports/:id
   - Returns 204 on success.
@@ -58,6 +60,11 @@ Supabase Client:
 
 Swagger docs:
 - Visit /docs after starting the server to see routes.
+
+API to DB field mapping:
+- Request body accepts "content" as the narrative of the weekly report. This value is stored in the table column "progress".
+- Responses from the CRUD endpoints return raw database rows and therefore will include "progress" (and not "content").
+- Other fields map directly: userId -> user_id, weekOf -> week_of, blockers -> blockers, plans -> plans.
 
 Materialized View auto-refresh:
 - After successful create, update, or delete operations on weekly_reports, the backend triggers a best-effort refresh of the materialized view public.latest_user_reports.

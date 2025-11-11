@@ -8,7 +8,7 @@
  *  - id: uuid (default)
  *  - user_id: text or uuid
  *  - week_of: date (ISO YYYY-MM-DD)
- *  - content: text
+ *  - progress: text
  *  - blockers: text
  *  - plans: text
  *  - created_at: timestamp (default now)
@@ -97,7 +97,8 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
   const row = {
     user_id: sanitizeString(userId),
     week_of: weekOf,
-    content: sanitizeString(content) || '',
+    // API accepts 'content' as an alias; persist into 'progress' column
+    progress: sanitizeString(content) || '',
     blockers: sanitizeString(blockers) || '',
     plans: sanitizeString(plans) || '',
   };
@@ -227,7 +228,8 @@ async function updateReport(id, patch) {
     }
     payload.week_of = patch.weekOf;
   }
-  if (patch.content !== undefined) payload.content = sanitizeString(patch.content);
+  // API accepts 'content' as alias; update DB 'progress' column
+  if (patch.content !== undefined) payload.progress = sanitizeString(patch.content);
   if (patch.blockers !== undefined) payload.blockers = sanitizeString(patch.blockers);
   if (patch.plans !== undefined) payload.plans = sanitizeString(patch.plans);
   // Optionally update updated_at via DB trigger; if not available, set here:
