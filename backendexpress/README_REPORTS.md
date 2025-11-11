@@ -1,54 +1,81 @@
-# Reports API (Read-only, minimal)
+# Reports API
 
-This backend exposes minimal read-only endpoints to fetch reports with an in-memory repository fallback.
+This backend now includes Supabase-backed CRUD endpoints for weekly reports while retaining legacy read-only demo endpoints.
 
 Base path: /api
 
-Endpoints:
+Read-only demo endpoints (in-memory):
 - GET /api/reports
-  - Returns all reports.
+  - Returns all demo reports.
 - GET /api/reports/mine
   - Filters by the x-user-id header.
   - Headers: x-user-id: <string>
 - GET /api/teams/:id/reports
   - Filters by team id path param.
 
-Headers (mock auth for demo):
-- x-user-id: string (required for /api/reports/mine)
-- x-user-name: optional
-
-Swagger docs:
-- Visit /docs after starting the server.
+Supabase CRUD endpoints:
+- POST /api/reports
+  - Body: { userId: string, weekOf: "YYYY-MM-DD", content?: string, blockers?: string, plans?: string }
+  - Returns 201 with created report.
+- GET /api/reports/:id
+  - Returns 200 with report.
+- GET /api/reports?userId=<id>&page=1&pageSize=20
+  - If userId provided, returns that user's paginated reports.
+  - If not, returns recent reports (paginated).
+  - Response: { items: Report[], page, pageSize, total? }
+- PATCH /api/reports/:id
+  - Body: { weekOf?: "YYYY-MM-DD", content?: string, blockers?: string, plans?: string }
+  - Returns 200 with updated report.
+- DELETE /api/reports/:id
+  - Returns 204 on success.
 
 Notes:
-- The service uses an in-memory repository (seeded with sample data). It is structured to be replaced with MongoDB later without changing the public interface.
+- Minimal validation: weekOf must be ISO date string "YYYY-MM-DD".
+- Basic string sanitization (trim).
+- Pagination limits pageSize to max 100.
 
-## Supabase integration (database client only)
+Auth:
+- TODO: Bind userId from Google auth (use req.user.id). For now, userId must be provided for POST and optional query for list.
+- No changes to auth middleware were made.
 
-We have added a Supabase client for future data access. Authentication and routes remain unchanged.
-
-Files:
-- src/services/supabaseClient.js
-  - Provides getClient(), isConfigured(), and healthCheck() helpers.
-  - Uses env vars: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.
-- src/repositories/reportsRepo.js
-  - Placeholder repository demonstrating a simple select from table weekly_reports (limit 1).
-  - Returns a typed error if Supabase is not configured.
+Error handling:
+- If Supabase is not configured, endpoints return 503 with a helpful message.
+- If the Supabase table weekly_reports does not exist, endpoints return 503 with guidance to run migrations.
+- Other database errors surface as 500 with message.
 
 Environment:
-- Copy .env.example to .env and fill the following:
+- Copy .env.example to .env and fill:
   - SUPABASE_URL
   - SUPABASE_SERVICE_ROLE_KEY
 
-How to obtain values:
-- In your Supabase project:
-  - SUPABASE_URL: Settings -> API -> Project URL
-  - SUPABASE_SERVICE_ROLE_KEY: Settings -> API -> service_role key (SERVER-SIDE ONLY, keep secret)
+Supabase Client:
+- src/services/supabaseClient.js
+  - getClient(), isConfigured(), healthCheck()
+- src/repositories/reportsRepo.js
+  - Implements CRUD using table `weekly_reports`.
 
-Health check:
-- Call healthCheck() from src/services/supabaseClient.js to verify connectivity:
-  - Returns { ok: boolean, configured: boolean, ... }
+Swagger docs:
+- Visit /docs after starting the server to see routes.
 
-Important:
-- No auth flow or route changes were made.
-- Repositories should handle the not-configured case gracefully as shown.
+Examples (curl):
+- Create:
+  curl -X POST http://localhost:3000/api/reports \
+    -H "Content-Type: application/json" \
+    -d '{"userId":"user-123","weekOf":"2025-01-06","content":"Shipped feature A","blockers":"None","plans":"Start feature B"}'
+
+- Get by id:
+  curl http://localhost:3000/api/reports/<id>
+
+- List recent:
+  curl "http://localhost:3000/api/reports?page=1&pageSize=20"
+
+- List by user:
+  curl "http://localhost:3000/api/reports?userId=user-123&page=1&pageSize=10"
+
+- Patch:
+  curl -X PATCH http://localhost:3000/api/reports/<id> \
+    -H "Content-Type: application/json" \
+    -d '{"content":"Updated text"}'
+
+- Delete:
+  curl -X DELETE http://localhost:3000/api/reports/<id>
