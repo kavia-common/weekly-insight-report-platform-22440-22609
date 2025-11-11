@@ -24,6 +24,28 @@
 
 const supabaseService = require('../services/supabaseClient');
 
+// Background refresh helper: non-blocking best effort
+function triggerRefreshLatestMV(preferConcurrent = true) {
+  if (!supabaseService.isConfigured() || typeof supabaseService.refreshLatestUserReports !== 'function') {
+    return;
+  }
+  // Fire-and-forget; log any errors but don't disrupt main flow
+  Promise.resolve()
+    .then(() => supabaseService.refreshLatestUserReports(preferConcurrent))
+    .then((res) => {
+      // eslint-disable-next-line no-console
+      if (res && res.ok) {
+        console.log(`[mv-refresh] latest_user_reports refreshed (concurrent=${res.concurrent === true})`);
+      } else if (res && res.error) {
+        console.warn(`[mv-refresh] refresh attempt failed: ${res.error}`);
+      }
+    })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn('[mv-refresh] refresh attempt threw:', err && err.message ? err.message : String(err));
+    });
+}
+
 const TABLE = 'weekly_reports';
 
 // Map common Supabase error codes/messages to user-friendly messages/status.
@@ -87,6 +109,8 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       const norm = normalizeDbError(error);
       return { ok: false, status: norm.status, error: norm.error };
     }
+    // Non-blocking refresh; prefer concurrent path
+    triggerRefreshLatestMV(true);
     return { ok: true, data };
   } catch (err) {
     const norm = normalizeDbError(err);
