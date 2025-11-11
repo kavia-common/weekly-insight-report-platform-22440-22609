@@ -76,6 +76,12 @@ function isISODate(val) {
   return /^\d{4}-\d{2}-\d{2}$/.test(val);
 }
 
+// Helper to get a known service-role client (never request-scoped)
+function getServiceClient() {
+  // Intentional: do NOT use any req-scoped auth; always use server service client to bypass RLS for trusted ops
+  return supabaseService.getClient();
+}
+
 // PUBLIC_INTERFACE
 async function createReport({ userId, weekOf, content, blockers, plans }) {
   if (!supabaseService.isConfigured()) {
@@ -104,7 +110,10 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
   };
 
   try {
-    const client = supabaseService.getClient();
+    const client = getServiceClient();
+    // Temporary diagnostics: confirm we are not using a user session
+    // eslint-disable-next-line no-console
+    console.log('[reportsRepo] Using service client for createReport (no request-scoped auth).');
     const { data, error } = await client.from(TABLE).insert(row).select('*').single();
     if (error) {
       const norm = normalizeDbError(error);
@@ -112,8 +121,6 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
     }
     // Non-blocking refresh; prefer concurrent path
     try {
-      // Call using the new signature: refreshLatestUserReports({ concurrent: true })
-      // Fire-and-forget using Promise.resolve with catch logging
       Promise.resolve()
         .then(() => supabaseService.refreshLatestUserReports({ concurrent: true }))
         .then((r) => {
@@ -151,7 +158,9 @@ async function getReportById(id) {
     return { ok: false, status: 400, error: 'Report id is required.' };
   }
   try {
-    const client = supabaseService.getClient();
+    const client = getServiceClient();
+    // eslint-disable-next-line no-console
+    console.log('[reportsRepo] Using service client for getReportById.');
     const { data, error } = await client.from(TABLE).select('*').eq('id', id).single();
     if (error) {
       const norm = normalizeDbError(error);
@@ -183,7 +192,9 @@ async function listReportsByUser({ userId, page = 1, pageSize = 20 }) {
   const to = from + ps - 1;
 
   try {
-    const client = supabaseService.getClient();
+    const client = getServiceClient();
+    // eslint-disable-next-line no-console
+    console.log('[reportsRepo] Using service client for listReportsByUser.');
     const { data, error, count } = await client
       .from(TABLE)
       .select('*', { count: 'exact' })
@@ -236,7 +247,9 @@ async function updateReport(id, patch) {
   payload.updated_at = new Date().toISOString();
 
   try {
-    const client = supabaseService.getClient();
+    const client = getServiceClient();
+    // eslint-disable-next-line no-console
+    console.log('[reportsRepo] Using service client for updateReport.');
     const { data, error } = await client.from(TABLE).update(payload).eq('id', id).select('*').single();
     if (error) {
       const norm = normalizeDbError(error);
@@ -281,7 +294,9 @@ async function deleteReport(id) {
     return { ok: false, status: 400, error: 'Report id is required.' };
   }
   try {
-    const client = supabaseService.getClient();
+    const client = getServiceClient();
+    // eslint-disable-next-line no-console
+    console.log('[reportsRepo] Using service client for deleteReport.');
     const { error } = await client.from(TABLE).delete().eq('id', id);
     if (error) {
       const norm = normalizeDbError(error);
@@ -328,7 +343,9 @@ async function listRecentReports({ page = 1, pageSize = 20 } = {}) {
   const to = from + ps - 1;
 
   try {
-    const client = supabaseService.getClient();
+    const client = getServiceClient();
+    // eslint-disable-next-line no-console
+    console.log('[reportsRepo] Using service client for listRecentReports.');
     const { data, error, count } = await client
       .from(TABLE)
       .select('*', { count: 'exact' })

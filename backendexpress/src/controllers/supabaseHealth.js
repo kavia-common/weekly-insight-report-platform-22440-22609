@@ -7,7 +7,7 @@ class SupabaseHealthController {
   /**
    * Check Supabase configuration and connectivity.
    * Response:
-   *  - 200 with JSON: { ok, configured, status?, statusText?, error? }
+   *  - 200 with JSON: { ok, configured, status?, statusText?, error?, keySource }
    */
   async check(req, res) {
     try {
@@ -22,7 +22,7 @@ class SupabaseHealthController {
           // Do not echo actual values for security
         },
         note: isConfigured()
-          ? 'Supabase env vars detected.'
+          ? `Supabase env vars detected. Using key from ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : (process.env.SUPABASE_KEY ? 'SUPABASE_KEY' : 'none')}.`
           : 'Supabase env vars missing. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
       });
     } catch (err) {
@@ -35,6 +35,9 @@ class SupabaseHealthController {
           SUPABASE_SERVICE_ROLE_KEY_present: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
           SUPABASE_KEY_present: Boolean(process.env.SUPABASE_KEY),
         },
+        note: isConfigured()
+          ? `Supabase env vars detected. Using key from ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : (process.env.SUPABASE_KEY ? 'SUPABASE_KEY' : 'none')}.`
+          : 'Supabase env vars missing. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
       });
     }
   }

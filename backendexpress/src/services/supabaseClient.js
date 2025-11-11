@@ -41,6 +41,15 @@ if (!process.env.SUPABASE_URL || !(process.env.SUPABASE_SERVICE_ROLE_KEY || proc
   console.warn(
     '[supabase] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Supabase client will be disabled until configured.'
   );
+} else {
+  // Extra startup diagnostics: identify which key type is being used (service vs anon heuristic)
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const keyPrefix = typeof key === 'string' ? key.split('.')[0] : '';
+  const looksAnon = typeof key === 'string' && key.startsWith('ey'); // anon/service are both JWTs; we hint only
+  // eslint-disable-next-line no-console
+  console.log(
+    `[supabase] Configuration detected. Using key from ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : 'SUPABASE_KEY'}. JWT-like: ${looksAnon ? 'yes' : 'no'}; prefix: ${keyPrefix ? keyPrefix.slice(0, 4) + '...' : 'n/a'} (value not logged).`
+  );
 }
 
 /**
@@ -130,16 +139,19 @@ function isConfigured() {
  *  - If not configured: returns { ok: false, configured: false, error: '...' }
  *  - If configured: perform a lightweight fetch to the base URL root with auth header.
  *    We expect a 200/404; any network/auth failures indicate issues.
+ * Adds diag: keySource to show which env var provided the key.
  */
 /** PUBLIC_INTERFACE */
 async function healthCheck() {
   const { url, key } = getEnv();
+  const keySource = process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : (process.env.SUPABASE_KEY ? 'SUPABASE_KEY' : 'none');
   if (!url || !key) {
     return {
       ok: false,
       configured: false,
       error:
         'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
+      keySource,
     };
   }
   try {
@@ -158,12 +170,14 @@ async function healthCheck() {
       configured: true,
       status: resp.status,
       statusText: resp.statusText,
+      keySource,
     };
   } catch (err) {
     return {
       ok: false,
       configured: true,
       error: err && err.message ? err.message : String(err),
+      keySource,
     };
   }
 }

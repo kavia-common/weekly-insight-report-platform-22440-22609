@@ -68,6 +68,9 @@ router.get('/', healthController.check.bind(healthController));
  *                       type: boolean
  *                     SUPABASE_SERVICE_ROLE_KEY_present:
  *                       type: boolean
+ *                 keySource:
+ *                   type: string
+ *                   description: Which env var provided the key (diagnostic only)
  */
 router.get('/api/health/supabase', supabaseHealthController.check.bind(supabaseHealthController));
 
