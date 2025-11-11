@@ -160,33 +160,21 @@ async function healthCheck() {
  * @param {boolean} [concurrent=true] - Whether to attempt concurrent refresh first.
  * @returns {Promise<{ok: boolean, concurrent?: boolean, error?: string}>}
  */
-async function refreshLatestUserReports(concurrent = true) {
+async function refreshLatestUserReports({ concurrent = true } = {}) {
   if (!isConfigured()) {
     return {
-      ok: false,
+      success: false,
+      concurrentUsed: false,
       error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
     };
   }
   const sqlConcurrent = 'REFRESH MATERIALIZED VIEW CONCURRENTLY public.latest_user_reports;';
   const sqlNonConcurrent = 'REFRESH MATERIALIZED VIEW public.latest_user_reports;';
   try {
-    const client = getClient();
+    // eslint-disable-next-line no-unused-vars
+    const client = getClient(); // ensures env/keys are valid
 
     const tryExecSql = async (sql) => {
-      // Supabase JS client does not expose arbitrary SQL directly; we call via PostgREST RPC.
-      // Expected: a Postgres function defined server-side to execute arbitrary SQL is NOT desirable.
-      // Instead, use the PostgREST /rest/v1/rpc with a dedicated function if available.
-      // Since we may not have a helper function, we leverage the HTTP edge directly.
-      // Supabase PostgREST doesn't support arbitrary SQL; thus we use the "pg" query via 'rest/v1' only for tables/views.
-      // Alternative: Use the "query" Postgres function through RPC. We'll attempt an RPC named 'exec_sql' if present,
-      // and if not, we return a descriptive error instructing operators to create the function.
-      //
-      // To keep this portable without requiring DB migration here, we'll use the Postgres cron workaround:
-      // However, that's out of scope. So we instead use the service's "pg" via fetch to the SQL endpoint.
-      //
-      // Supabase provides a SQL API at: POST {SUPABASE_URL}/pg/sql
-      // This is an internal endpoint; in many setups it is available when using service role key.
-      // We'll call it here with appropriate headers. If unavailable, we return a clear error.
       const endpoint = `${SUPABASE_URL}/pg/sql`;
       const resp = await fetch(endpoint, {
         method: 'POST',
@@ -195,9 +183,7 @@ async function refreshLatestUserReports(concurrent = true) {
           Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          query: sql,
-        }),
+        body: JSON.stringify({ query: sql }),
       });
       if (!resp.ok) {
         const text = await resp.text().catch(() => '');
@@ -209,28 +195,38 @@ async function refreshLatestUserReports(concurrent = true) {
     if (concurrent) {
       try {
         await tryExecSql(sqlConcurrent);
-        return { ok: true, concurrent: true };
+        return { success: true, concurrentUsed: true };
       } catch (err) {
-        const msg = (err && err.message) ? err.message : String(err);
-        // Fall back only when concurrent is not supported due to missing unique index or similar errors
-        // Common message fragments: "cannot refresh materialized view concurrently" or "no unique index"
-        const canFallback = /concurrently/i.test(msg) || /unique index/i.test(msg) || /cannot refresh/i.test(msg);
+        const msg = err && err.message ? err.message : String(err);
+        const canFallback =
+          /concurrently/i.test(msg) ||
+          /unique index/i.test(msg) ||
+          /cannot refresh/i.test(msg) ||
+          /could not create unique index/i.test(msg);
         if (!canFallback) {
-          return { ok: false, error: msg };
+          return { success: false, concurrentUsed: true, error: msg };
         }
         try {
           await tryExecSql(sqlNonConcurrent);
-          return { ok: true, concurrent: false };
+          return { success: true, concurrentUsed: false };
         } catch (err2) {
-          return { ok: false, error: err2 && err2.message ? err2.message : String(err2) };
+          return {
+            success: false,
+            concurrentUsed: false,
+            error: err2 && err2.message ? err2.message : String(err2),
+          };
         }
       }
     } else {
       await tryExecSql(sqlNonConcurrent);
-      return { ok: true, concurrent: false };
+      return { success: true, concurrentUsed: false };
     }
   } catch (errOuter) {
-    return { ok: false, error: errOuter && errOuter.message ? errOuter.message : String(errOuter) };
+    return {
+      success: false,
+      concurrentUsed: false,
+      error: errOuter && errOuter.message ? errOuter.message : String(errOuter),
+    };
   }
 }
 

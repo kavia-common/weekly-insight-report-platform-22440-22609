@@ -3,6 +3,7 @@ const healthController = require('../controllers/health');
 const supabaseHealthController = require('../controllers/supabaseHealth');
 const reportsRoutes = require('./reports');
 const reportsCrudRoutes = require('./reportsCrud');
+const adminMaintenanceRoutes = require('./adminMaintenance');
 
 const router = express.Router();
 // Health endpoint
@@ -73,7 +74,10 @@ router.get('/api/health/supabase', supabaseHealthController.check.bind(supabaseH
 // Mount existing read-only demo routes
 router.use('/', reportsRoutes);
 
-// Mount new CRUD routes
+/* Mount new CRUD routes */
 router.use('/', reportsCrudRoutes);
+
+/* Mount admin maintenance routes */
+router.use('/', adminMaintenanceRoutes);
 
 module.exports = router;

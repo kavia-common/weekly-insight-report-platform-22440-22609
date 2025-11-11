@@ -57,6 +57,25 @@ Supabase Client:
 Swagger docs:
 - Visit /docs after starting the server to see routes.
 
+Materialized View auto-refresh:
+- After successful create, update, or delete operations on weekly_reports, the backend triggers a best-effort refresh of the materialized view public.latest_user_reports.
+- It attempts a concurrent refresh first (requires a UNIQUE index on the MV). If the concurrent refresh fails due to index/constraint limitations, it falls back to a non-concurrent refresh.
+- The refresh is executed in a fire-and-forget manner and does not affect the success of the primary mutation.
+
+Manual refresh endpoint:
+- GET /api/admin/maintenance/refresh-latest-reports?concurrent=true
+  - Returns 200: { refreshed: true, concurrent: boolean } on success
+  - Returns 503 if Supabase is not configured
+  - Returns 500 on execution errors
+- Requires the backend to be configured with the Supabase Service Role Key; ensure the service runs with SUPABASE_SERVICE_ROLE_KEY (do not use anon key).
+- For concurrent refresh to work, ensure you have a unique index on the MV that covers all rows, e.g.:
+  CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS latest_user_reports_unique_idx ON public.latest_user_reports (user_id);
+
+Operational caveats:
+- Non-concurrent refresh will lock the MV, which can temporarily block reads from it during refresh.
+- The refresh is performed via Supabase SQL API and requires service role privileges.
+- If the SQL API is disabled in your environment, you may need to create a secure RPC function that executes the REFRESH command and grant execute permission to the service role.
+
 Examples (curl):
 - Create:
   curl -X POST http://localhost:3000/api/reports \

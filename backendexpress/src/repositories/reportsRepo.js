@@ -110,7 +110,25 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       return { ok: false, status: norm.status, error: norm.error };
     }
     // Non-blocking refresh; prefer concurrent path
-    triggerRefreshLatestMV(true);
+    try {
+      // Call using the new signature: refreshLatestUserReports({ concurrent: true })
+      // Fire-and-forget using Promise.resolve with catch logging
+      Promise.resolve()
+        .then(() => supabaseService.refreshLatestUserReports({ concurrent: true }))
+        .then((r) => {
+          if (!r || !r.success) {
+            // eslint-disable-next-line no-console
+            console.warn('[mv-refresh] create -> refresh failed:', r && r.error);
+          }
+        })
+        .catch((e) => {
+          // eslint-disable-next-line no-console
+          console.warn('[mv-refresh] create -> refresh threw:', e && e.message ? e.message : String(e));
+        });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[mv-refresh] create -> trigger error:', e && e.message ? e.message : String(e));
+    }
     return { ok: true, data };
   } catch (err) {
     const norm = normalizeDbError(err);
@@ -222,6 +240,24 @@ async function updateReport(id, patch) {
       const norm = normalizeDbError(error);
       return { ok: false, status: norm.status, error: norm.error };
     }
+    // Fire-and-forget refresh
+    try {
+      Promise.resolve()
+        .then(() => supabaseService.refreshLatestUserReports({ concurrent: true }))
+        .then((r) => {
+          if (!r || !r.success) {
+            // eslint-disable-next-line no-console
+            console.warn('[mv-refresh] update -> refresh failed:', r && r.error);
+          }
+        })
+        .catch((e) => {
+          // eslint-disable-next-line no-console
+          console.warn('[mv-refresh] update -> refresh threw:', e && e.message ? e.message : String(e));
+        });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[mv-refresh] update -> trigger error:', e && e.message ? e.message : String(e));
+    }
     return { ok: true, data };
   } catch (err) {
     const norm = normalizeDbError(err);
@@ -248,6 +284,24 @@ async function deleteReport(id) {
     if (error) {
       const norm = normalizeDbError(error);
       return { ok: false, status: norm.status, error: norm.error };
+    }
+    // Fire-and-forget refresh
+    try {
+      Promise.resolve()
+        .then(() => supabaseService.refreshLatestUserReports({ concurrent: true }))
+        .then((r) => {
+          if (!r || !r.success) {
+            // eslint-disable-next-line no-console
+            console.warn('[mv-refresh] delete -> refresh failed:', r && r.error);
+          }
+        })
+        .catch((e) => {
+          // eslint-disable-next-line no-console
+          console.warn('[mv-refresh] delete -> refresh threw:', e && e.message ? e.message : String(e));
+        });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[mv-refresh] delete -> trigger error:', e && e.message ? e.message : String(e));
     }
     return { ok: true, data: { id } };
   } catch (err) {
