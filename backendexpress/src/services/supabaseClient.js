@@ -61,6 +61,8 @@ function makeRealClient(url, key) {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
+      // IMPORTANT: we never set a per-request user JWT on this client;
+      // doing so would downgrade privileges and trigger RLS unexpectedly.
     },
     global: {
       headers: {

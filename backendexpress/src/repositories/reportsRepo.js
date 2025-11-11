@@ -58,7 +58,17 @@ function normalizeDbError(err) {
       error: 'Database table "weekly_reports" is missing. Please run migrations.',
     };
   }
-  return { status: 500, error: message };
+  // Include more context if available
+  const enriched = {
+    status: 500,
+    error: message,
+  };
+  if (err && typeof err === 'object') {
+    if (err.code) enriched.code = err.code;
+    if (err.hint) enriched.hint = err.hint;
+    if (err.details) enriched.details = err.details;
+  }
+  return enriched;
 }
 
 // Sanitize string inputs
@@ -81,6 +91,9 @@ function getServiceClient() {
   // Intentional: do NOT use any req-scoped auth; always use server service client to bypass RLS for trusted ops
   return supabaseService.getClient();
 }
+
+// Optional diagnostics toggle (set DIAGNOSTICS=1 in env to enable richer logs/returns)
+const DIAGNOSTICS = process.env.DIAGNOSTICS === '1';
 
 // PUBLIC_INTERFACE
 async function createReport({ userId, weekOf, content, blockers, plans }) {
@@ -114,11 +127,44 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
     // Temporary diagnostics: confirm we are not using a user session
     // eslint-disable-next-line no-console
     console.log('[reportsRepo] Using service client for createReport (no request-scoped auth).');
+
+    // 1) Schema existence/lightweight read check
+    const preflight = await client.from(TABLE).select('id').limit(1);
+    if (preflight.error) {
+      const norm = normalizeDbError(preflight.error);
+      return {
+        ok: false,
+        status: norm.status,
+        error: norm.error,
+        ...(DIAGNOSTICS ? { diag: { stage: 'preflight_select', ...norm } } : {}),
+      };
+    }
+
+    // 2) Server-side context diagnostics via RPC (best-effort)
+    let rpcDiag = {};
+    try {
+      const { data: uidData, error: uidErr } = await client.rpc('auth_uid'); // will error if function not present
+      const { data: isAdminData, error: isAdminErr } = await client.rpc('is_admin', { user_id: uidData || null });
+      rpcDiag = {
+        auth_uid: uidErr ? 'unavailable' : uidData,
+        is_admin: isAdminErr ? 'unavailable' : isAdminData,
+      };
+    } catch (e) {
+      rpcDiag = { note: 'rpc diagnostics unavailable' };
+    }
+
+    // 3) Attempt insert
     const { data, error } = await client.from(TABLE).insert(row).select('*').single();
     if (error) {
       const norm = normalizeDbError(error);
-      return { ok: false, status: norm.status, error: norm.error };
+      return {
+        ok: false,
+        status: norm.status,
+        error: norm.error,
+        ...(DIAGNOSTICS ? { diag: { stage: 'insert', ...norm, rpc: rpcDiag } } : {}),
+      };
     }
+
     // Non-blocking refresh; prefer concurrent path
     try {
       Promise.resolve()
@@ -137,7 +183,7 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       // eslint-disable-next-line no-console
       console.warn('[mv-refresh] create -> trigger error:', e && e.message ? e.message : String(e));
     }
-    return { ok: true, data };
+    return { ok: true, data, ...(DIAGNOSTICS ? { diag: { rpc: rpcDiag } } : {}) };
   } catch (err) {
     const norm = normalizeDbError(err);
     return { ok: false, status: norm.status, error: norm.error };
