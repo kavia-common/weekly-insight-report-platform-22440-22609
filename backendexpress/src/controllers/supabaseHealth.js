@@ -18,6 +18,7 @@ class SupabaseHealthController {
         env: {
           SUPABASE_URL_present: Boolean(process.env.SUPABASE_URL),
           SUPABASE_SERVICE_ROLE_KEY_present: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+          SUPABASE_KEY_present: Boolean(process.env.SUPABASE_KEY),
           // Do not echo actual values for security
         },
         note: isConfigured()
@@ -32,6 +33,7 @@ class SupabaseHealthController {
         env: {
           SUPABASE_URL_present: Boolean(process.env.SUPABASE_URL),
           SUPABASE_SERVICE_ROLE_KEY_present: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+          SUPABASE_KEY_present: Boolean(process.env.SUPABASE_KEY),
         },
       });
     }

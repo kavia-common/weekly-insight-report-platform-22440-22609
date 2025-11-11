@@ -46,11 +46,13 @@ Error handling:
 Environment:
 - Copy .env.example to .env and fill:
   - SUPABASE_URL
-  - SUPABASE_SERVICE_ROLE_KEY
+  - SUPABASE_SERVICE_ROLE_KEY (Service Role key; do NOT use anon key)
+- The server loads dotenv at boot (src/server.js), so variables in .env will be available at runtime.
+- An alias SUPABASE_KEY is accepted for backward compatibility, but you should migrate to SUPABASE_SERVICE_ROLE_KEY.
 
 Supabase Client:
 - src/services/supabaseClient.js
-  - getClient(), isConfigured(), healthCheck()
+  - getClient(), isConfigured(), healthCheck(), refreshLatestUserReports()
 - src/repositories/reportsRepo.js
   - Implements CRUD using table `weekly_reports`.
 

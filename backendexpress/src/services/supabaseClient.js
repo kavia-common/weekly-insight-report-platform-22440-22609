@@ -4,37 +4,50 @@
  * Supabase client service for server-side usage.
  * Reads configuration from environment variables:
  *  - SUPABASE_URL
- *  - SUPABASE_SERVICE_ROLE_KEY
+ *  - SUPABASE_SERVICE_ROLE_KEY (preferred)
+ * Also supports SUPABASE_KEY as a backward-compatible alias for the service role key.
  *
  * Exports:
  *  - getClient(): returns a verified supabase client or throws if not configured
  *  - isConfigured(): boolean indicating if env vars are present
  *  - healthCheck(): performs a minimal check against Supabase to validate connectivity and auth
+ *  - refreshLatestUserReports(): triggers MV refresh via SQL API
  *
  * Note: This module does NOT alter auth flows or wire routes. It is a reusable service.
  */
 
 const { createClient } = require('@supabase/supabase-js');
 
-// Load env if not already loaded (server usually loads dotenv at entry)
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-  // Provide a single concise warning once on module import; client methods will still guard and throw as needed.
-  // We don't throw here to keep the app booting in environments without Supabase configured yet.
-  // eslint-disable-next-line no-console
-  console.warn(
-    '[supabase] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Supabase client will be disabled. ' +
-      'Set both vars to enable database operations.'
-  );
+// Resolve env on-demand to avoid stale values if dotenv loaded later
+function getEnv() {
+  const url = process.env.SUPABASE_URL;
+  // Prefer SERVICE_ROLE_KEY, but accept SUPABASE_KEY as alias for backward compatibility
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '';
+
+  if (process.env.SUPABASE_KEY && !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[supabase] Detected SUPABASE_KEY. Please migrate to SUPABASE_SERVICE_ROLE_KEY. Using it as a fallback.'
+    );
+  }
+
+  return { url, key };
 }
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// Single import-time notice to help operators if missing
+if (!process.env.SUPABASE_URL || !(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY)) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[supabase] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Supabase client will be disabled until configured.'
+  );
+}
 
 /**
  * Internal: Create a real supabase client when configured.
  */
-function makeRealClient() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+function makeRealClient(url, key) {
+  return createClient(url, key, {
     // Server-side best practices
     auth: {
       persistSession: false,
@@ -73,21 +86,27 @@ const disabledClient = {
 };
 
 let cachedClient = null;
+let cachedKey = null;
+let cachedUrl = null;
 
 /**
  * PUBLIC_INTERFACE
  * getClient
  * Returns a Supabase client if configured; otherwise throws an informative error.
  */
+/** PUBLIC_INTERFACE */
 function getClient() {
-  if (!isConfigured()) {
-    // For explicit calls expecting a client, we throw to encourage caller-side handling.
+  const { url, key } = getEnv();
+  if (!url || !key) {
     throw new Error(
       '[supabase] Not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
     );
   }
-  if (!cachedClient) {
-    cachedClient = makeRealClient();
+  // Rebuild client if env changed since last creation
+  if (!cachedClient || cachedUrl !== url || cachedKey !== key) {
+    cachedClient = makeRealClient(url, key);
+    cachedUrl = url;
+    cachedKey = key;
   }
   return cachedClient;
 }
@@ -95,10 +114,12 @@ function getClient() {
 /**
  * PUBLIC_INTERFACE
  * isConfigured
- * Returns true if both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY env vars are present.
+ * Returns true if both SUPABASE_URL and a service role key env var are present.
  */
+/** PUBLIC_INTERFACE */
 function isConfigured() {
-  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+  const { url, key } = getEnv();
+  return Boolean(url && key);
 }
 
 /**
@@ -110,8 +131,10 @@ function isConfigured() {
  *  - If configured: perform a lightweight fetch to the base URL root with auth header.
  *    We expect a 200/404; any network/auth failures indicate issues.
  */
+/** PUBLIC_INTERFACE */
 async function healthCheck() {
-  if (!isConfigured()) {
+  const { url, key } = getEnv();
+  if (!url || !key) {
     return {
       ok: false,
       configured: false,
@@ -120,16 +143,16 @@ async function healthCheck() {
     };
   }
   try {
-    // Perform a NOOP GET to the Supabase REST root (this does not expose data but checks connectivity/token validity)
-    const resp = await fetch(SUPABASE_URL, {
+    // Perform a NOOP GET to the Supabase REST root (this checks connectivity/token acceptance at edge)
+    const resp = await fetch(url, {
       method: 'GET',
       headers: {
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: key,
+        Authorization: `Bearer ${key}`,
       },
     });
 
-    const okish = resp.status >= 200 && resp.status < 500; // 2xx/3xx/404 still indicates reachable and token accepted at edge
+    const okish = resp.status >= 200 && resp.status < 500; // 2xx/3xx/404 indicate reachable edge
     return {
       ok: okish,
       configured: true,
@@ -157,30 +180,35 @@ async function healthCheck() {
  * - Requires service role key.
  * - Non-concurrent refresh may lock the MV for reads/writes until completion.
  *
- * @param {boolean} [concurrent=true] - Whether to attempt concurrent refresh first.
- * @returns {Promise<{ok: boolean, concurrent?: boolean, error?: string}>}
+ * @param {{concurrent?: boolean}} [options] - Whether to attempt concurrent refresh first (default true).
+ * @returns {Promise<{success: boolean, concurrentUsed?: boolean, error?: string}>}
  */
+/** PUBLIC_INTERFACE */
 async function refreshLatestUserReports({ concurrent = true } = {}) {
-  if (!isConfigured()) {
+  const { url, key } = getEnv();
+  if (!url || !key) {
     return {
       success: false,
       concurrentUsed: false,
-      error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
+      error:
+        'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
     };
   }
-  const sqlConcurrent = 'REFRESH MATERIALIZED VIEW CONCURRENTLY public.latest_user_reports;';
+  const sqlConcurrent =
+    'REFRESH MATERIALIZED VIEW CONCURRENTLY public.latest_user_reports;';
   const sqlNonConcurrent = 'REFRESH MATERIALIZED VIEW public.latest_user_reports;';
   try {
+    // Ensure env/keys are valid and client can be created
     // eslint-disable-next-line no-unused-vars
-    const client = getClient(); // ensures env/keys are valid
+    const client = getClient();
 
     const tryExecSql = async (sql) => {
-      const endpoint = `${SUPABASE_URL}/pg/sql`;
+      const endpoint = `${url}/pg/sql`;
       const resp = await fetch(endpoint, {
         method: 'POST',
         headers: {
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          apikey: key,
+          Authorization: `Bearer ${key}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ query: sql }),
