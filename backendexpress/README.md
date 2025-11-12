@@ -21,6 +21,16 @@ Behavior without Supabase:
 - Supabase-backed CRUD routes return 503 with guidance.
 - /api/health/supabase shows configured=false and env presence flags.
 
+Verify Supabase integration:
+- With .env set, GET /api/health/supabase should show:
+  - configured=true
+  - env flags with *_present true (secrets are never echoed)
+  - status/statusText from Supabase edge (200/404 indicates reachable)
+  - keySource indicating which env var supplied the key
+- Startup logs show:
+  - [startup] Supabase env -> URL: true, SERVICE_ROLE_KEY: true, KEY(alias): (true/false)
+  - [supabase] Configuration detected... (diagnostic only)
+
 Files:
 - src/services/supabaseClient.js: central Supabase initialization and helpers
 - src/repositories/reportsRepo.js: Supabase-backed CRUD for weekly_reports
