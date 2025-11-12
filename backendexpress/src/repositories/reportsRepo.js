@@ -147,6 +147,38 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       };
     }
 
+    // 1b) Verify the referenced user exists (to avoid FK violation). Check public.users first, then auth.users.
+    let userExists = false;
+    try {
+      const { data: puData, error: puErr } = await client.from('users').select('id').eq('id', userId).limit(1);
+      if (!puErr && Array.isArray(puData)) {
+        userExists = puData.length > 0;
+      } else if (puErr && /relation .* does not exist/i.test(puErr.message || '')) {
+        // public.users table not present; continue to auth.users check
+      }
+    } catch (e) {
+      // ignore; try auth.users
+    }
+    if (!userExists) {
+      try {
+        // Note: querying the auth schema via REST may not be available in all environments.
+        const { data: auData, error: auErr } = await client.from('auth.users').select('id').eq('id', userId).limit(1);
+        if (!auErr && Array.isArray(auData)) {
+          userExists = auData.length > 0;
+        }
+      } catch (e2) {
+        // ignore
+      }
+    }
+    if (!userExists) {
+      return {
+        ok: false,
+        status: 400,
+        error:
+          'User does not exist for provided userId. Provide a valid userId that exists in users/auth.users or create the user first.',
+      };
+    }
+
     // 2) Server-side context diagnostics via RPC (best-effort)
     let rpcDiag = {};
     try {

@@ -45,7 +45,7 @@ const router = express.Router();
  *       201:
  *         description: Report created
  *       400:
- *         description: Invalid payload
+ *         description: Invalid payload or user does not exist
  *       503:
  *         description: Database not ready (table missing or Supabase not configured)
  */
@@ -56,11 +56,24 @@ router.post('/api/reports', controller.create.bind(controller));
  * /api/reports/selftest:
  *   post:
  *     summary: Self-test insert (service role)
- *     description: Attempts to insert a test report using the server-side Supabase service role client. Returns 201 if RLS is bypassed correctly by service role.
+ *     description: >
+ *       Attempts to insert a test report using the server-side Supabase service role client.
+ *       Optionally accepts a userId in the body to use for the insert. If not provided, the endpoint will
+ *       create or reuse a synthetic test user in public.users to satisfy the foreign key, then insert the report.
  *     tags: [WeeklyReports]
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               userId:
+ *                 type: string
+ *                 description: Optional userId to use for the self-test. If omitted, a synthetic user will be upserted.
  *     responses:
  *       201:
- *         description: Self-test report created (service role insert succeeded)
+ *         description: Self-test succeeded (user ensured/created and report inserted)
  *       503:
  *         description: Supabase not configured
  *       500:
