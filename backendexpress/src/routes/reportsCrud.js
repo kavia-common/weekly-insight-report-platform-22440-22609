@@ -2,6 +2,7 @@
 
 const express = require('express');
 const controller = require('../controllers/reportsController');
+const selfTestController = require('../controllers/reportsSelfTest');
 
 const router = express.Router();
 
@@ -49,6 +50,23 @@ const router = express.Router();
  *         description: Database not ready (table missing or Supabase not configured)
  */
 router.post('/api/reports', controller.create.bind(controller));
+
+/**
+ * @swagger
+ * /api/reports/selftest:
+ *   post:
+ *     summary: Self-test insert (service role)
+ *     description: Attempts to insert a test report using the server-side Supabase service role client. Returns 201 if RLS is bypassed correctly by service role.
+ *     tags: [WeeklyReports]
+ *     responses:
+ *       201:
+ *         description: Self-test report created (service role insert succeeded)
+ *       503:
+ *         description: Supabase not configured
+ *       500:
+ *         description: Database error (e.g., table missing or other failure)
+ */
+router.post('/api/reports/selftest', selfTestController.selfTestInsert.bind(selfTestController));
 
 /**
  * @swagger

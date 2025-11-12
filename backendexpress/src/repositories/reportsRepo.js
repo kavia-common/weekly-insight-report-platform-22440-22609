@@ -58,6 +58,13 @@ function normalizeDbError(err) {
       error: 'Database table "weekly_reports" is missing. Please run migrations.',
     };
   }
+  // RLS violation hint
+  if (/row-level security/i.test(message) || /violates row-level security/i.test(message)) {
+    return {
+      status: 500,
+      error: `${message}. Hint: ensure the backend uses SUPABASE_SERVICE_ROLE_KEY (service role) and not the anon key. See README for RLS guidance.`,
+    };
+  }
   // Include more context if available
   const enriched = {
     status: 500,
