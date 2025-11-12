@@ -8,8 +8,8 @@ const { isConfigured, getSupabaseDiagnostics } = require('../services/supabaseCl
  *
  * PUBLIC_INTERFACE
  * GET /api/reports/users/:userId/check
- * Validates provided userId (trim + UUID) and checks for existence in auth.users (schema-targeted).
- * Returns non-sensitive diagnostics to aid troubleshooting.
+ * Validates provided userId (trim + UUID) and checks for existence in public.profiles (mirror of auth.users).
+ * Returns non-sensitive diagnostics to aid troubleshooting. Deprecated: auth.users for this endpoint.
  */
 class ReportsUserCheckController {
   // PUBLIC_INTERFACE
@@ -37,7 +37,7 @@ class ReportsUserCheckController {
           found: false,
           error: result.error,
           host,
-          notes: 'Checked against auth.users using head+count exact with schema targeting.',
+          notes: 'Checked against public.profiles using head+count exact.',
           diag: result.diag,
         });
       }
@@ -45,7 +45,7 @@ class ReportsUserCheckController {
         found: !!result.found,
         count: result.count,
         host,
-        notes: 'Validated userId format and queried auth.users via schema targeting.',
+        notes: 'Validated userId format and queried public.profiles (mirror of auth.users).',
         diag: result.diag,
       });
     } catch (err) {

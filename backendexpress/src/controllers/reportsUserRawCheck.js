@@ -1,6 +1,6 @@
 'use strict';
 
-const { isConfigured, getSupabaseDiagnostics, getClient, getAuthClient } = require('../services/supabaseClient');
+const { isConfigured, getSupabaseDiagnostics, getClient } = require('../services/supabaseClient');
 
 /**
  * ReportsUserRawCheckController
@@ -9,13 +9,14 @@ const { isConfigured, getSupabaseDiagnostics, getClient, getAuthClient } = requi
  * GET /api/reports/users/:userId/raw-check
  *
  * Purpose:
- * - Perform a raw diagnostic query to Supabase auth.users using the same schema-targeted
- *   service-role client and exact query path used by the repository.
- * - This endpoint helps validate PostgREST schema targeting and any unexpected filters.
+ * - Perform a raw diagnostic query to Supabase public.profiles (mirror of auth.users)
+ *   using the service-role client and exact query path used by the repository.
+ * - This endpoint helps validate the mirror and availability under public schema.
+ * - Deprecated note: previous versions targeted auth.users; that path is now reserved for deeper diagnostics only.
  *
  * Behavior:
  * 1) Trims the provided userId (no UUID validation gate to allow checking raw behavior).
- * 2) Executes preferred explicit db.schema('auth') client; on error, falls back to REST via Accept-Profile: auth.
+ * 2) Executes query via public schema client; on error, falls back to REST with Accept-Profile: public.
  * 3) Returns JSON indicating which method succeeded and includes error messages when both fail (no secrets).
  */
 class ReportsUserRawCheckController {
@@ -45,47 +46,47 @@ class ReportsUserRawCheckController {
           found: false,
           error: 'userId is required as a non-empty string.',
           host,
-          query: { schema: 'auth', table: 'users', eq: userId },
-          notes: 'Provide a UUID or string to test direct equality against auth.users.id using schema targeting.',
+          query: { schema: 'public', table: 'profiles', eq: userId },
+          notes: 'Provide a UUID or string to test direct equality against public.profiles.id.',
         });
       }
 
       const results = {
-        authClient: { ok: false, count: null, rows: [], error: null },
+        publicClient: { ok: false, count: null, rows: [], error: null },
         rest: { ok: false, count: null, rows: [], error: null },
       };
 
-      // Attempt 1: explicit auth client
+      // Attempt 1: public schema client -> public.profiles
       try {
-        const authClient = getAuthClient();
-        const r = await authClient
-          .from('users')
+        const publicClient = getClient();
+        const r = await publicClient
+          .from('profiles')
           .select('id', { head: false, count: 'exact' })
           .eq('id', userId)
           .limit(2);
         if (!r.error) {
-          results.authClient.ok = true;
-          results.authClient.count = typeof r.count === 'number' ? r.count : null;
-          results.authClient.rows = Array.isArray(r.data) ? r.data.map(x => x && x.id).filter(Boolean) : [];
+          results.publicClient.ok = true;
+          results.publicClient.count = typeof r.count === 'number' ? r.count : null;
+          results.publicClient.rows = Array.isArray(r.data) ? r.data.map(x => x && x.id).filter(Boolean) : [];
         } else {
-          results.authClient.error = r.error.message || String(r.error);
+          results.publicClient.error = r.error.message || String(r.error);
         }
       } catch (e1) {
-        results.authClient.error = e1 && e1.message ? e1.message : String(e1);
+        results.publicClient.error = e1 && e1.message ? e1.message : String(e1);
       }
 
-      // Attempt 2: REST fallback if needed
-      if (!results.authClient.ok) {
+      // Attempt 2: REST fallback if needed (public schema)
+      if (!results.publicClient.ok) {
         try {
           const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_KEY } = process.env;
           const url = SUPABASE_URL;
           const key = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_KEY;
-          const resp = await fetch(`${url}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, {
+          const resp = await fetch(`${url}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
             method: 'GET',
             headers: {
               apikey: key,
               Authorization: `Bearer ${key}`,
-              'Accept-Profile': 'auth',
+              'Accept-Profile': 'public',
             },
           });
           if (resp.ok) {
@@ -102,38 +103,38 @@ class ReportsUserRawCheckController {
         }
       }
 
-      // Choose success precedence: authClient, then REST
-      const chosen = results.authClient.ok ? results.authClient : (results.rest.ok ? results.rest : null);
+      // Choose success precedence: publicClient, then REST
+      const chosen = results.publicClient.ok ? results.publicClient : (results.rest.ok ? results.rest : null);
 
       if (!chosen) {
         // eslint-disable-next-line no-console
-        console.error('[raw-check] Both methods failed', { authClient: results.authClient.error, rest: results.rest.error });
+        console.error('[raw-check] Both methods failed', { publicClient: results.publicClient.error, rest: results.rest.error });
         return res.status(200).json({
           found: false,
           count: 0,
           rows: [],
           host,
-          query: { schema: 'auth', table: 'users', eq: userId },
-          notes: 'Tried explicit auth schema client first; then REST fallback with Accept-Profile: auth.',
+          query: { schema: 'public', table: 'profiles', eq: userId },
+          notes: 'Tried public.profiles query via client first; then REST fallback with Accept-Profile: public.',
           methods: {
-            authClient: { ok: false, count: null, error: results.authClient.error },
+            publicClient: { ok: false, count: null, error: results.publicClient.error },
             rest: { ok: false, count: null, error: results.rest.error },
           },
         });
       }
 
       const found = (typeof chosen.count === 'number' ? chosen.count : chosen.rows.length) > 0;
-      const methodName = chosen === results.authClient ? 'authClient' : 'rest';
+      const methodName = chosen === results.publicClient ? 'publicClient' : 'rest';
 
       return res.status(200).json({
         found,
         count: typeof chosen.count === 'number' ? chosen.count : chosen.rows.length,
         rows: chosen.rows,
         host,
-        query: { schema: 'auth', table: 'users', eq: userId },
-        notes: 'Performed auth.users lookup using auth schema client; used REST fallback if needed.',
+        query: { schema: 'public', table: 'profiles', eq: userId },
+        notes: 'Performed public.profiles lookup using public schema client; used REST fallback if needed.',
         methods: {
-          authClient: { ok: results.authClient.ok, count: results.authClient.count, error: results.authClient.error || null },
+          publicClient: { ok: results.publicClient.ok, count: results.publicClient.count, error: results.publicClient.error || null },
           rest: { ok: results.rest.ok, count: results.rest.count, error: results.rest.error || null },
           succeeded: methodName,
         },

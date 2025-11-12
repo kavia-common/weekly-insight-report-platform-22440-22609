@@ -83,6 +83,11 @@ const DIAGNOSTICS = process.env.DIAGNOSTICS === '1';
  * with head+count exact, and that no controller/route attempts to coerce
  * non-UUID path fragments (like 'diagnostics') into UUIDs.
  */
+/**
+ * NOTE: User validation now checks against public.profiles (mirror of auth.users) for existence.
+ * The weekly_reports.user_id FK remains against auth.users(id) at the DB level.
+ * Deprecated: direct auth.users checks for POST path (retained in diagnostics endpoints only).
+ */
 // PUBLIC_INTERFACE
 async function createReport({ userId, weekOf, content, blockers, plans }) {
   if (!supabaseService.isConfigured()) {
@@ -114,24 +119,29 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       return { ok: false, status: norm.status, error: norm.error, ...(DIAGNOSTICS ? { diag: { stage: 'preflight_select', ...norm } } : {}) };
     }
 
-    // Verify user exists in auth.users with schema-qualified existence check; include diagnostics
-    const { exists, count, error: existErr, diag: existDiag } = await supabaseService.authUsersExists(trimmedUserId);
-    if (existErr) {
-      // Include diagnostics to help operators (host, schema, path)
+    // New: Verify user exists in public.profiles (mirror table). Use service-role default client (public schema).
+    const profilesCheck = await client
+      .from('profiles')
+      .select('id', { head: true, count: 'exact' })
+      .eq('id', trimmedUserId)
+      .limit(1);
+
+    if (profilesCheck.error) {
+      const norm = normalizeDbError(profilesCheck.error);
       return {
         ok: false,
         status: 400,
-        error: `Failed to verify user in auth.users: ${existErr}`,
-        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, error: existErr, ...existDiag } } : {}),
+        error: `Failed to verify user in public.profiles: ${norm.error}`,
+        ...(DIAGNOSTICS ? { diag: { existenceSource: 'public.profiles', stage: 'profiles_check', ...norm } } : {}),
       };
     }
-    if (!exists) {
-      // Temporarily include count and error details when not found to surface via POST /api/reports
+    const profilesCount = typeof profilesCheck.count === 'number' ? profilesCheck.count : 0;
+    if (profilesCount !== 1) {
       return {
         ok: false,
         status: 400,
-        error: 'User not found in auth.users for provided userId. Ensure the user exists in Supabase Auth and try again.',
-        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, error: existErr || null, ...existDiag } } : {}),
+        error: 'User not found in public.profiles for provided userId. Ensure profiles mirror is populated.',
+        ...(DIAGNOSTICS ? { diag: { existenceSource: 'public.profiles', count: profilesCount } } : {}),
       };
     }
 
@@ -144,7 +154,7 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
 
     // Trigger MV refresh (best effort)
     triggerRefreshLatestMV(true);
-    return { ok: true, data, ...(DIAGNOSTICS ? { diag: { existence: { count, ...existDiag } } } : {}) };
+    return { ok: true, data, ...(DIAGNOSTICS ? { diag: { existence: { source: 'public.profiles', count: profilesCount } } } : {}) };
   } catch (err) {
     const norm = normalizeDbError(err);
     return { ok: false, status: norm.status, error: norm.error };
@@ -319,9 +329,12 @@ module.exports = {
 
   // PUBLIC_INTERFACE
   /**
-   * checkAuthUserExists
-   * Validates and checks if a provided userId exists in auth.users using schema-targeted existence check.
-   * Returns: { ok: true, found: boolean, count?: number, diag: { host, schema, path } } or { ok: false, status, error, diag? }
+   * checkAuthUserExists (Deprecated for validation; now checks public.profiles)
+   * Validates and checks if a provided userId exists in public.profiles using service-role client.
+   * Returns: { ok: true, found: boolean, count?: number, diag: { schema: 'public', path: 'public.profiles' } } or { ok: false, status, error, diag? }
+   *
+   * Note: We keep the name for routing compatibility but switch the target table to public.profiles.
+   *       Diagnostics endpoints still provide auth.users raw checks separately.
    */
   async checkAuthUserExists(userId) {
     if (!supabaseService.isConfigured()) {
@@ -335,19 +348,21 @@ module.exports = {
       return { ok: false, status: 400, error: 'userId must be a valid UUID.' };
     }
     try {
-      // Use authClient first with fallback handled in service
-      const { exists, count, error, diag } = await supabaseService.authUsersExists(trimmed);
+      const client = supabaseService.getClient(); // public schema client
+      const { count, error } = await client
+        .from('profiles')
+        .select('id', { head: true, count: 'exact' })
+        .eq('id', trimmed)
+        .limit(1);
       if (error) {
-        // Surface exact error text without secrets
-        return { ok: false, status: 400, error: `Unable to verify user in auth.users: ${error}`, diag: { ...diag, count } };
+        const norm = normalizeDbError(error);
+        return { ok: false, status: 400, error: `Unable to verify user in public.profiles: ${norm.error}`, diag: { schema: 'public', path: 'public.profiles' } };
       }
-      // Include which method succeeded (authClient vs rest)
-      const mechanism = diag && diag.method ? (diag.method === 'rest' ? 'REST' : 'authClient') : 'authClient';
       return {
         ok: true,
-        found: !!exists,
+        found: count === 1,
         count: typeof count === 'number' ? count : undefined,
-        diag: { ...diag, mechanism }
+        diag: { schema: 'public', path: 'public.profiles' }
       };
     } catch (err) {
       const norm = normalizeDbError(err);
