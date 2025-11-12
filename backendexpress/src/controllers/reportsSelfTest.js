@@ -13,8 +13,9 @@ class ReportsSelfTestController {
   // PUBLIC_INTERFACE
   /**
    * selfTestInsert
-   * Creates a test weekly report row using a synthetic user and the current date.
-   * Does not require any body. Returns 201 on success.
+   * Creates a test weekly report row using a deterministic valid UUID for userId
+   * and the current date (YYYY-MM-DD) for weekOf. Does not require any body.
+   * Returns 201 on success.
    * Response:
    *  - 201 { ok: true, data: row }
    *  - 503 when Supabase not configured
@@ -22,8 +23,10 @@ class ReportsSelfTestController {
    */
   async selfTestInsert(req, res) {
     const today = new Date();
+    // Ensure valid YYYY-MM-DD
     const weekISO = today.toISOString().slice(0, 10);
-    const testUserId = 'selftest-user-' + today.getTime();
+    // Use a deterministic valid UUID to satisfy UUID-typed user_id columns
+    const testUserId = '00000000-0000-0000-0000-000000000000';
 
     const result = await repo.createReport({
       userId: testUserId,
