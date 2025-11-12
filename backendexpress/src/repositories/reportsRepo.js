@@ -147,43 +147,29 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       };
     }
 
-    // 1b) Verify the referenced user exists (to avoid FK violation).
-    // Check public.users first, then auth.users (service-role client can access auth schema).
+    // 1b) Verify the referenced user exists ONLY in auth.users (foreign key target).
     // Compare against the UUID/text string provided as userId.
     let userExists = false;
-    let existenceSource = 'none';
+    let existenceSource = 'auth.users';
     try {
-      const { data: puData, error: puErr } = await client
-        .from('users') // public schema default
+      const { data: auData, error: auErr } = await client
+        .from('auth.users')
         .select('id')
         .eq('id', userId)
         .limit(1);
-      if (!puErr && Array.isArray(puData)) {
-        userExists = puData.length > 0;
-        if (userExists) existenceSource = 'public.users';
-      } else if (puErr && /relation .* does not exist/i.test(puErr.message || '')) {
-        // public.users table not present; continue to auth.users check
-      }
-    } catch (e) {
-      // ignore; try auth.users next
-    }
-    if (!userExists) {
-      try {
-        // IMPORTANT: correct fully-qualified table for auth schema is 'auth.users'
-        const { data: auData, error: auErr } = await client
-          .from('auth.users')
-          .select('id')
-          .eq('id', userId)
-          .limit(1);
-        if (!auErr && Array.isArray(auData)) {
-          userExists = auData.length > 0;
-          if (userExists) existenceSource = 'auth.users';
-        } else if (auErr && /permission denied|schema .* does not exist|relation .* does not exist/i.test(auErr.message || '')) {
-          // Some environments may restrict REST on auth schema; in such cases,
-          // rely on FK failure to surface a helpful error later.
+      if (!auErr && Array.isArray(auData)) {
+        userExists = auData.length > 0;
+      } else if (auErr) {
+        // Some environments may restrict REST on auth schema. Treat as not found but include diagnostics.
+        if (DIAGNOSTICS) {
+          // eslint-disable-next-line no-console
+          console.warn('[reportsRepo] auth.users lookup error:', auErr.message || auErr);
         }
-      } catch (e2) {
-        // ignore; will error out below if not found
+      }
+    } catch (e2) {
+      if (DIAGNOSTICS) {
+        // eslint-disable-next-line no-console
+        console.warn('[reportsRepo] auth.users lookup threw:', e2 && e2.message ? e2.message : String(e2));
       }
     }
 
@@ -191,7 +177,7 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
     const DEBUG = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development' || DIAGNOSTICS;
     if (DEBUG) {
       // eslint-disable-next-line no-console
-      console.log(`[reportsRepo] user existence check -> exists=${userExists} source=${existenceSource} userId=${userId}`);
+      console.log(`[reportsRepo] user existence check (auth.users only) -> exists=${userExists} userId=${userId}`);
     }
 
     if (!userExists) {
@@ -199,7 +185,7 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
         ok: false,
         status: 400,
         error:
-          'User does not exist for provided userId. Provide a valid userId that exists in public.users or auth.users.',
+          'User not found in auth.users for provided userId. Ensure the user exists in auth.users (Supabase Auth) and try again.',
         ...(DIAGNOSTICS ? { diag: { existenceSource } } : {}),
       };
     }

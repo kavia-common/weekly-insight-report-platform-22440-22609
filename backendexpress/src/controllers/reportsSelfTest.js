@@ -7,10 +7,11 @@ const { getClient, isConfigured } = require('../services/supabaseClient');
  * ReportsSelfTestController
  *
  * Self-test verifies that the server-side Supabase client (service role) can insert into weekly_reports.
- * It also ensures the foreign key on weekly_reports.user_id is satisfied by:
- *  - Accepting an optional userId in the JSON body and using it when provided, OR
- *  - Upserting a synthetic test user in public.users when userId is not provided or does not exist.
- * Clear response indicates whether a user was created/used and whether the report was inserted.
+ * It validates the foreign key on weekly_reports.user_id strictly against auth.users(id).
+ * Behavior now:
+ *  - Accepts a userId in the JSON body (optional but recommended). If provided, verifies it exists in auth.users.
+ *  - If not provided, returns 400 advising to pass an existing userId from auth.users.
+ * The response provides clear diagnostics on whether the user was found in auth.users.
  */
 class ReportsSelfTestController {
   // PUBLIC_INTERFACE

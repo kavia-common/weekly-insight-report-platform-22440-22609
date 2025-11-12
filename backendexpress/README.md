@@ -40,11 +40,11 @@ RLS and inserts to weekly_reports:
 
 Self-test endpoint:
 - POST /api/reports/selftest
-  - Optional body: { "userId": "<existing-user-uuid-or-text>" }
-  - If userId is provided, the self-test uses it (and will create the user in public.users if missing).
-  - If not provided, the self-test upserts a synthetic user in public.users and uses it.
-  - Returns 201 with details indicating whether a user was created and the report inserted.
-  - Use this to verify your environment can insert despite RLS and satisfy the foreign key to users.
+  - Optional body: { "userId": "<existing-auth-users-uuid>" }
+  - If userId is provided, the self-test verifies it exists in auth.users; proceeds only if found.
+  - If not provided, the endpoint returns 400 with guidance to pass a valid user id from auth.users.
+  - Returns 201 when a report is inserted using the provided auth.users id.
+  - Use this to verify server-side inserts (service role) and that your weekly_reports.user_id FK to auth.users works.
 
 Optional policy approach (not required when using Service Role):
 - If you want to allow anon inserts instead (not recommended), create a permissive RLS policy on public.weekly_reports:

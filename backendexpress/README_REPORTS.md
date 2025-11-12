@@ -16,7 +16,7 @@ Read-only demo endpoints (in-memory):
 Supabase CRUD endpoints:
 - POST /api/reports
   - Body: { userId: string, weekOf: "YYYY-MM-DD", content?: string, blockers?: string, plans?: string }
-  - Validation: userId must reference an existing user row (either public.users.id or auth.users.id depending on your FK). If not found, returns 400 with a helpful message.
+  - Validation: userId must reference an existing user row in auth.users(id). If not found in auth.users, returns 400 with a helpful message.
   - Field mapping: the request field "content" is stored in the database column "progress".
   - Returns 201 with created report when valid.
 - GET /api/reports/:id
