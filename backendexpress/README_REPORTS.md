@@ -90,6 +90,9 @@ Examples (curl):
 - Diagnostics:
   curl http://localhost:3000/api/reports/diagnostics
 
+- User existence check (auth.users):
+  curl http://localhost:3000/api/reports/users/391eb516-4e8e-43e8-84a4-5e24a8a3d1d6/check
+
 - Self-test (requires an existing auth.users UUID):
   curl -X POST http://localhost:3000/api/reports/selftest \
     -H "Content-Type: application/json" \

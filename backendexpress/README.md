@@ -46,6 +46,11 @@ Self-test endpoint (updated):
   - Returns 400 with structured diagnostics if the user is missing in auth.users or the UUID is invalid.
   - This confirms server-side inserts (service role) and validates your weekly_reports.user_id FK to auth.users.
 
+User existence check:
+- GET /api/reports/users/:userId/check
+  - Validates UUID and checks existence strictly against auth.users using schema('auth').from('users').select('id', { head: true, count: 'exact' }).eq('id', userId).limit(1).
+  - Returns {found, count, host, notes} with non-sensitive diagnostics to aid troubleshooting.
+
 Auth schema targeting (auth.users):
 - The backend queries Supabase Auth's "auth.users" using client.schema('auth').from('users') with head+count existence checks (no PII selection).
 - Diagnostics include:

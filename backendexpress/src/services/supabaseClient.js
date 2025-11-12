@@ -370,7 +370,7 @@ async function authUsersExists(userId) {
   const trimmed = userId.trim();
   try {
     const base = getClient();
-    // Use the same client URL/headers; for schema targeting use Accept-Profile headers.
+    // Use schema targeting via Accept-Profile/Content-Profile headers to explicitly query auth.users.
     const svc = base.schema('auth');
     const { count, error } = await svc
       .from('users')

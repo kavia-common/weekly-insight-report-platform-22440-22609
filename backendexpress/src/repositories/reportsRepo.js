@@ -311,6 +311,35 @@ module.exports = {
     }
   },
 
+  // PUBLIC_INTERFACE
+  /**
+   * checkAuthUserExists
+   * Validates and checks if a provided userId exists in auth.users using schema-targeted existence check.
+   * Returns: { ok: true, found: boolean, count?: number, diag: { host, schema, path } } or { ok: false, status, error, diag? }
+   */
+  async checkAuthUserExists(userId) {
+    if (!supabaseService.isConfigured()) {
+      return { ok: false, status: 503, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
+    }
+    const trimmed = sanitizeString(userId);
+    if (!trimmed) {
+      return { ok: false, status: 400, error: 'userId is required.' };
+    }
+    if (!supabaseService.isValidUUID(trimmed)) {
+      return { ok: false, status: 400, error: 'userId must be a valid UUID.' };
+    }
+    try {
+      const { exists, count, error, diag } = await supabaseService.authUsersExists(trimmed);
+      if (error) {
+        return { ok: false, status: 400, error: `Unable to verify user in auth.users: ${error}`, diag: { ...diag, count } };
+      }
+      return { ok: true, found: !!exists, count: typeof count === 'number' ? count : undefined, diag };
+    } catch (err) {
+      const norm = normalizeDbError(err);
+      return { ok: false, status: norm.status, error: norm.error };
+    }
+  },
+
   createReport,
   getReportById,
   listReportsByUser,

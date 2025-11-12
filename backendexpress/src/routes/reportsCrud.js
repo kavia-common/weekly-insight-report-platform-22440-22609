@@ -4,6 +4,7 @@ const express = require('express');
 const controller = require('../controllers/reportsController');
 const selfTestController = require('../controllers/reportsSelfTest');
 const reportsDiagnosticsController = require('../controllers/reportsControllerDiagnostics');
+const reportsUserCheckController = require('../controllers/reportsUserCheck');
 
 const router = express.Router();
 
@@ -191,5 +192,31 @@ router.delete('/api/reports/:id', controller.remove.bind(controller));
  *         description: Diagnostics payload
  */
 router.get('/api/reports/diagnostics', reportsDiagnosticsController.get.bind(reportsDiagnosticsController));
+
+/**
+ * @swagger
+ * /api/reports/users/{userId}/check:
+ *   get:
+ *     summary: Check if a user exists in auth.users
+ *     description: >
+ *       Trims and validates the provided userId as UUID and checks existence against auth.users using schema targeting
+ *       with a head+count exact query. Returns non-sensitive diagnostics including Supabase host.
+ *     tags: [WeeklyReports]
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           description: UUID from auth.users(id)
+ *     responses:
+ *       200:
+ *         description: Existence check completed
+ *       400:
+ *         description: Invalid UUID or verification error
+ *       503:
+ *         description: Supabase not configured
+ */
+router.get('/api/reports/users/:userId/check', reportsUserCheckController.check.bind(reportsUserCheckController));
 
 module.exports = router;
