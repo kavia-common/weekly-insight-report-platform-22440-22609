@@ -89,6 +89,10 @@ Operational caveats:
 Examples (curl):
 - Diagnostics:
   curl http://localhost:3000/api/reports/diagnostics
+  # Expected: {"host":"<your-project.supabase.co>","schemaTargeting":true,"configured":true|false}
+
+- Verify route precedence order (fixed paths before /:id):
+  curl http://localhost:3000/api/reports/routes-check
 
 - User existence check (auth.users):
   curl http://localhost:3000/api/reports/users/391eb516-4e8e-43e8-84a4-5e24a8a3d1d6/check

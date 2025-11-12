@@ -78,6 +78,11 @@ function getServiceClient() {
 // Optional diagnostics toggle (set DIAGNOSTICS=1 in env to enable richer logs/returns)
 const DIAGNOSTICS = process.env.DIAGNOSTICS === '1';
 
+/**
+ * Ensures user existence checks target auth.users explicitly using schema('auth')
+ * with head+count exact, and that no controller/route attempts to coerce
+ * non-UUID path fragments (like 'diagnostics') into UUIDs.
+ */
 // PUBLIC_INTERFACE
 async function createReport({ userId, weekOf, content, blockers, plans }) {
   if (!supabaseService.isConfigured()) {

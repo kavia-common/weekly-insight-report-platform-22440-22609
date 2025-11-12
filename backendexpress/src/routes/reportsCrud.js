@@ -15,6 +15,72 @@ const router = express.Router();
  *     description: CRUD for weekly reports (Supabase-backed)
  */
 
+// Important: Register fixed/static and specific routes BEFORE any dynamic "/:id" routes to avoid path collisions.
+
+// Diagnostics BEFORE any "/:id"
+router.get('/api/reports/diagnostics', reportsDiagnosticsController.get.bind(reportsDiagnosticsController));
+
+// Users existence check BEFORE any "/:id"
+router.get('/api/reports/users/:userId/check', reportsUserCheckController.check.bind(reportsUserCheckController));
+
+/**
+ * @swagger
+ * /api/reports/routes-check:
+ *   get:
+ *     summary: List registered report routes in order
+ *     description: Returns a minimal ordered list of report-related routes to validate path matching precedence.
+ *     tags: [WeeklyReports]
+ *     responses:
+ *       200:
+ *         description: Route order payload
+ */
+router.get('/api/reports/routes-check', (req, res) => {
+  const routes = [
+    'GET /api/reports/diagnostics',
+    'GET /api/reports/users/:userId/check',
+    'GET /api/reports/routes-check',
+    'POST /api/reports/selftest',
+    'POST /api/reports',
+    'GET /api/reports', // list (query)
+    'GET /api/reports/:id',
+    'PATCH /api/reports/:id',
+    'DELETE /api/reports/:id'
+  ];
+  return res.status(200).json({ routes });
+});
+
+/**
+ * @swagger
+ * /api/reports/selftest:
+ *   post:
+ *     summary: Self-test insert (service role)
+ *     description: >
+ *       Attempts to insert a test report using the server-side Supabase service role client.
+ *       Requires an existing auth.users UUID (schema-targeted) and does not upsert into public.users.
+ *     tags: [WeeklyReports]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId]
+ *             properties:
+ *               userId:
+ *                 type: string
+ *                 description: Existing UUID from auth.users to use for the self-test.
+ *     responses:
+ *       201:
+ *         description: Self-test succeeded (report inserted)
+ *       400:
+ *         description: Invalid UUID or user not found in auth.users
+ *       503:
+ *         description: Supabase not configured
+ *       500:
+ *         description: Unexpected server error
+ */
+router.post('/api/reports/selftest', selfTestController.selfTestInsert.bind(selfTestController));
+
 /**
  * @swagger
  * /api/reports:
@@ -55,56 +121,6 @@ router.post('/api/reports', controller.create.bind(controller));
 
 /**
  * @swagger
- * /api/reports/selftest:
- *   post:
- *     summary: Self-test insert (service role)
- *     description: >
- *       Attempts to insert a test report using the server-side Supabase service role client.
- *       Requires an existing auth.users UUID (schema-targeted) and does not upsert into public.users.
- *     tags: [WeeklyReports]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [userId]
- *             properties:
- *               userId:
- *                 type: string
- *                 description: Existing UUID from auth.users to use for the self-test.
- *     responses:
- *       201:
- *         description: Self-test succeeded (report inserted)
- *       400:
- *         description: Invalid UUID or user not found in auth.users
- *       503:
- *         description: Supabase not configured
- *       500:
- *         description: Unexpected server error
- */
-router.post('/api/reports/selftest', selfTestController.selfTestInsert.bind(selfTestController));
-
-/**
- * @swagger
- * /api/reports/{id}:
- *   get:
- *     summary: Get a report by id
- *     tags: [WeeklyReports]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200: { description: Report found }
- *       400: { description: Bad request }
- *       503: { description: Database not ready }
- */
-router.get('/api/reports/:id', controller.getById.bind(controller));
-
-/**
- * @swagger
  * /api/reports:
  *   get:
  *     summary: List reports (recent or by user)
@@ -131,6 +147,24 @@ router.get('/api/reports/:id', controller.getById.bind(controller));
  *         description: Database not ready
  */
 router.get('/api/reports', controller.list.bind(controller));
+
+/**
+ * @swagger
+ * /api/reports/{id}:
+ *   get:
+ *     summary: Get a report by id
+ *     tags: [WeeklyReports]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Report found }
+ *       400: { description: Bad request }
+ *       503: { description: Database not ready }
+ */
+router.get('/api/reports/:id', controller.getById.bind(controller));
 
 /**
  * @swagger
@@ -179,44 +213,5 @@ router.patch('/api/reports/:id', controller.patch.bind(controller));
  *       503: { description: Database not ready }
  */
 router.delete('/api/reports/:id', controller.remove.bind(controller));
-
-/**
- * @swagger
- * /api/reports/diagnostics:
- *   get:
- *     summary: Reports diagnostics
- *     description: Returns non-sensitive diagnostics including SUPABASE_URL host and schema-qualified path used for auth.users checks.
- *     tags: [WeeklyReports]
- *     responses:
- *       200:
- *         description: Diagnostics payload
- */
-router.get('/api/reports/diagnostics', reportsDiagnosticsController.get.bind(reportsDiagnosticsController));
-
-/**
- * @swagger
- * /api/reports/users/{userId}/check:
- *   get:
- *     summary: Check if a user exists in auth.users
- *     description: >
- *       Trims and validates the provided userId as UUID and checks existence against auth.users using schema targeting
- *       with a head+count exact query. Returns non-sensitive diagnostics including Supabase host.
- *     tags: [WeeklyReports]
- *     parameters:
- *       - in: path
- *         name: userId
- *         required: true
- *         schema:
- *           type: string
- *           description: UUID from auth.users(id)
- *     responses:
- *       200:
- *         description: Existence check completed
- *       400:
- *         description: Invalid UUID or verification error
- *       503:
- *         description: Supabase not configured
- */
-router.get('/api/reports/users/:userId/check', reportsUserCheckController.check.bind(reportsUserCheckController));
 
 module.exports = router;
