@@ -12,8 +12,11 @@
  *  - isConfigured(): boolean indicating if env vars are present
  *  - healthCheck(): performs a minimal check against Supabase to validate connectivity and auth
  *  - refreshLatestUserReports(): triggers MV refresh via SQL API
+ *  - authUsersExists(userId): robust existence check against auth.users(id), schema-targeted
  *
- * Note: This module does NOT alter auth flows or wire routes. It is a reusable service.
+ * Notes:
+ * - Uses the Service Role key exclusively for server-side operations to bypass RLS.
+ * - Adds global schema targeting support with supabase-js v2 via experimental schema() override.
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -36,7 +39,10 @@ function getEnv() {
 }
 
 // Single import-time notice to help operators if missing
-if (!process.env.SUPABASE_URL || !(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY)) {
+if (
+  !process.env.SUPABASE_URL ||
+  !(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY)
+) {
   // eslint-disable-next-line no-console
   console.warn(
     '[supabase] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Supabase client will be disabled until configured.'
@@ -45,31 +51,73 @@ if (!process.env.SUPABASE_URL || !(process.env.SUPABASE_SERVICE_ROLE_KEY || proc
   // Extra startup diagnostics: identify which key type is being used (service vs anon heuristic)
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
   const keyPrefix = typeof key === 'string' ? key.split('.')[0] : '';
-  const looksAnon = typeof key === 'string' && key.startsWith('ey'); // anon/service are both JWTs; we hint only
+  const looksJwt = typeof key === 'string' && key.startsWith('ey'); // anon/service are both JWTs; we hint only
   // eslint-disable-next-line no-console
   console.log(
-    `[supabase] Configuration detected. Using key from ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : 'SUPABASE_KEY'}. JWT-like: ${looksAnon ? 'yes' : 'no'}; prefix: ${keyPrefix ? keyPrefix.slice(0, 4) + '...' : 'n/a'} (value not logged).`
+    `[supabase] Configuration detected. Using key from ${
+      process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : 'SUPABASE_KEY'
+    }. JWT-like: ${looksJwt ? 'yes' : 'no'}; prefix: ${
+      keyPrefix ? keyPrefix.slice(0, 4) + '...' : 'n/a'
+    } (value not logged).`
   );
 }
 
 /**
  * Internal: Create a real supabase client when configured.
+ * We attach a convenience .schema(name) method to select a schema by setting the PostgREST profile header.
+ * This avoids relying on table name prefixes like 'auth.users'.
  */
 function makeRealClient(url, key) {
-  return createClient(url, key, {
+  const client = createClient(url, key, {
     // Server-side best practices
     auth: {
       persistSession: false,
       autoRefreshToken: false,
-      // IMPORTANT: we never set a per-request user JWT on this client;
-      // doing so would downgrade privileges and trigger RLS unexpectedly.
+      detectSessionInUrl: false,
     },
     global: {
       headers: {
         'X-Client-Info': 'weekly-insight-report-platform/backendexpress',
+        // Explicitly set default schema to 'public' via PostgREST profile header
+        // We'll override when targeting auth schema using client.schema('auth')
+        'Accept-Profile': 'public',
+        'Content-Profile': 'public',
       },
     },
   });
+
+  /**
+   * PUBLIC_INTERFACE
+   * schema(name)
+   * Returns a shallow wrapper that sends Accept-Profile/Content-Profile headers for a specific schema
+   * allowing .from('users') to target that schema.
+   */
+  // PUBLIC_INTERFACE
+  client.schema = function schema(name) {
+    const baseHeaders = client.storage && client.storage.headers ? client.storage.headers : {};
+    const schemaHeaders = {
+      ...baseHeaders,
+      'Accept-Profile': name,
+      'Content-Profile': name,
+    };
+    // Create a new client instance that reuses the same URL/key but with overridden headers.
+    // We avoid persisting sessions or other differences.
+    return createClient(url, key, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+      global: {
+        headers: {
+          ...schemaHeaders,
+          'X-Client-Info': 'weekly-insight-report-platform/backendexpress',
+        },
+      },
+    });
+  };
+
+  return client;
 }
 
 /**
@@ -88,12 +136,16 @@ const disabledClient = {
       );
     },
   },
-  // Allow generic method pattern to fail fast
   rpc() {
     throw new Error(
       '[supabase] Client is not configured. Ensure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set.'
     );
   },
+  schema() {
+    throw new Error(
+      '[supabase] Client is not configured. Schema targeting unavailable.'
+    );
+  }
 };
 
 let cachedClient = null;
@@ -103,14 +155,10 @@ let cachedUrl = null;
 /**
  * PUBLIC_INTERFACE
  * getClient
- * Returns a Supabase client if configured; otherwise throws an informative error.
- */
-/** PUBLIC_INTERFACE */
-/**
- * getClient
  * Returns an initialized Supabase client using service role credentials.
  * Throws an informative error if not configured.
  */
+// PUBLIC_INTERFACE
 function getClient() {
   const { url, key } = getEnv();
   if (!url || !key) {
@@ -130,14 +178,10 @@ function getClient() {
 /**
  * PUBLIC_INTERFACE
  * isConfigured
- * Returns true if both SUPABASE_URL and a service role key env var are present.
- */
-/** PUBLIC_INTERFACE */
-/**
- * isConfigured
  * Indicates whether SUPABASE_URL and a service key are present.
  * Returns boolean.
  */
+// PUBLIC_INTERFACE
 function isConfigured() {
   const { url, key } = getEnv();
   return Boolean(url && key);
@@ -146,22 +190,15 @@ function isConfigured() {
 /**
  * PUBLIC_INTERFACE
  * healthCheck
- * Performs a minimal call to validate Supabase availability and credentials.
- * Strategy:
- *  - If not configured: returns { ok: false, configured: false, error: '...' }
- *  - If configured: perform a lightweight fetch to the base URL root with auth header.
- *    We expect a 200/404; any network/auth failures indicate issues.
- * Adds diag: keySource to show which env var provided the key.
- */
-/** PUBLIC_INTERFACE */
-/**
- * healthCheck
  * Lightweight connectivity check to Supabase edge using provided credentials.
  * Does not leak secrets; returns status booleans and minimal diagnostics.
  */
+// PUBLIC_INTERFACE
 async function healthCheck() {
   const { url, key } = getEnv();
-  const keySource = process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : (process.env.SUPABASE_KEY ? 'SUPABASE_KEY' : 'none');
+  const keySource = process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? 'SUPABASE_SERVICE_ROLE_KEY'
+    : (process.env.SUPABASE_KEY ? 'SUPABASE_KEY' : 'none');
   if (!url || !key) {
     return {
       ok: false,
@@ -202,25 +239,11 @@ async function healthCheck() {
 /**
  * PUBLIC_INTERFACE
  * refreshLatestUserReports
- * Refreshes the materialized view public.latest_user_reports.
- * Tries CONCURRENTLY first (requires a unique index on the MV), and falls back to non-concurrent
- * if CONCURRENTLY is not supported. Returns an object indicating success/failure and whether
- * concurrency was used.
- *
- * Note:
- * - Requires service role key.
- * - Non-concurrent refresh may lock the MV for reads/writes until completion.
- *
- * @param {{concurrent?: boolean}} [options] - Whether to attempt concurrent refresh first (default true).
- * @returns {Promise<{success: boolean, concurrentUsed?: boolean, error?: string}>}
- */
-/** PUBLIC_INTERFACE */
-/**
- * refreshLatestUserReports
  * Attempts to refresh public.latest_user_reports materialized view via SQL API.
  * @param {{concurrent?: boolean}} options
  * @returns {Promise<{success: boolean, concurrentUsed?: boolean, error?: string}>}
  */
+// PUBLIC_INTERFACE
 async function refreshLatestUserReports({ concurrent = true } = {}) {
   const { url, key } = getEnv();
   if (!url || !key) {
@@ -295,11 +318,45 @@ async function refreshLatestUserReports({ concurrent = true } = {}) {
   }
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * authUsersExists
+ * Robust existence check for a user id in auth.users schema.
+ * Uses head+count exact query against schema('auth').from('users') to avoid selecting data.
+ * Returns { exists: boolean, error?: string, count?: number }
+ */
+// PUBLIC_INTERFACE
+async function authUsersExists(userId) {
+  if (!isConfigured()) {
+    return { exists: false, error: 'not_configured' };
+  }
+  if (!userId || typeof userId !== 'string') {
+    return { exists: false, error: 'invalid_user_id' };
+  }
+  try {
+    const base = getClient();
+    const svc = base.schema('auth');
+    const { count, error } = await svc
+      .from('users')
+      .select('id', { head: true, count: 'exact' })
+      .eq('id', userId)
+      .limit(1);
+
+    if (error) {
+      return { exists: false, error: error.message || String(error) };
+    }
+    return { exists: count === 1, count: typeof count === 'number' ? count : undefined };
+  } catch (err) {
+    return { exists: false, error: err && err.message ? err.message : String(err) };
+  }
+}
+
 module.exports = {
   getClient,
   isConfigured,
   healthCheck,
   refreshLatestUserReports,
+  authUsersExists,
   // Expose a safe reference: callers that import and try .from without checking will get a clear error.
   clientOrDisabled: () => (isConfigured() ? getClient() : disabledClient),
 };

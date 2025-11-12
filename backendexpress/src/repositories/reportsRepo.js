@@ -135,7 +135,7 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
     // eslint-disable-next-line no-console
     console.log('[reportsRepo] Using service client for createReport (no request-scoped auth).');
 
-    // 1) Schema existence/lightweight read check
+    // 1) Schema existence/lightweight read check for our target table
     const preflight = await client.from(TABLE).select('id').limit(1);
     if (preflight.error) {
       const norm = normalizeDbError(preflight.error);
@@ -147,37 +147,38 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       };
     }
 
-    // 1b) Verify the referenced user exists ONLY in auth.users (foreign key target).
-    // Compare against the UUID/text string provided as userId.
+    // 1b) Verify the referenced user exists in auth.users using schema-targeted head+count query
     let userExists = false;
     let existenceSource = 'auth.users';
+    let existenceDiag = {};
     try {
-      const { data: auData, error: auErr } = await client
-        .from('auth.users')
-        .select('id')
-        .eq('id', userId)
-        .limit(1);
-      if (!auErr && Array.isArray(auData)) {
-        userExists = auData.length > 0;
-      } else if (auErr) {
-        // Some environments may restrict REST on auth schema. Treat as not found but include diagnostics.
-        if (DIAGNOSTICS) {
-          // eslint-disable-next-line no-console
-          console.warn('[reportsRepo] auth.users lookup error:', auErr.message || auErr);
-        }
-      }
+      const { exists, count, error: existErr } = await supabaseService.authUsersExists(userId);
+      userExists = exists === true;
+      existenceDiag = {
+        count: typeof count === 'number' ? count : undefined,
+        error: existErr || undefined,
+      };
     } catch (e2) {
-      if (DIAGNOSTICS) {
-        // eslint-disable-next-line no-console
-        console.warn('[reportsRepo] auth.users lookup threw:', e2 && e2.message ? e2.message : String(e2));
-      }
+      existenceDiag = { error: e2 && e2.message ? e2.message : String(e2) };
     }
 
     // Debug logging toggle via DEBUG or DIAGNOSTICS env
     const DEBUG = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development' || DIAGNOSTICS;
     if (DEBUG) {
       // eslint-disable-next-line no-console
-      console.log(`[reportsRepo] user existence check (auth.users only) -> exists=${userExists} userId=${userId}`);
+      const url = process.env.SUPABASE_URL || '';
+      const host = (() => {
+        try {
+          const u = new URL(url);
+          return u.host || '';
+        } catch (_) {
+          return '';
+        }
+      })();
+      console.log(`[reportsRepo] auth.users existence check -> exists=${userExists} count=${existenceDiag.count ?? 'n/a'} host=${host}`);
+      if (existenceDiag.error) {
+        console.warn('[reportsRepo] existence check error (non-fatal if RLS-restricted):', existenceDiag.error);
+      }
     }
 
     if (!userExists) {
@@ -185,8 +186,8 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
         ok: false,
         status: 400,
         error:
-          'User not found in auth.users for provided userId. Ensure the user exists in auth.users (Supabase Auth) and try again.',
-        ...(DIAGNOSTICS ? { diag: { existenceSource } } : {}),
+          'User not found in auth.users for provided userId. Ensure the user exists in Supabase Auth and try again.',
+        ...(DIAGNOSTICS ? { diag: { existenceSource, ...existenceDiag } } : {}),
       };
     }
 
@@ -467,6 +468,7 @@ async function listRecentReports({ page = 1, pageSize = 20 } = {}) {
 
 /**
  * INTERNAL: quick verification used by operators to simulate a lookup and insert.
+ * Uses schema-targeted auth.users existence check under the hood.
  * Not exported publicly via routes; used for debugging in development/diagnostics.
  */
 async function __debugVerifyAndInsertExample() {

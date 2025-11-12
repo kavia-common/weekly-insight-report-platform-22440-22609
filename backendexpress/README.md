@@ -46,6 +46,15 @@ Self-test endpoint:
   - Returns 201 when a report is inserted using the provided auth.users id.
   - Use this to verify server-side inserts (service role) and that your weekly_reports.user_id FK to auth.users works.
 
+Auth schema targeting (auth.users):
+- The backend must query Supabase Auth's "auth.users" table using the "auth" schema. We configure the Supabase client to support schema-targeted queries and use a head+count existence check to avoid selecting PII.
+- If your project restricts REST access to the auth schema, ensure the backend is using the Service Role key. We never log secrets. Diagnostics may log the Supabase URL host and whether count=1.
+- If you see "User not found in auth.users" for an id you know exists, verify:
+  1) SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set in backend .env.
+  2) The id is exactly the UUID from Auth (auth.users.id).
+  3) /api/health/supabase shows configured=true.
+  4) Try POST /api/reports with that userId again. The backend now explicitly targets schema('auth') for existence checks.
+
 Optional policy approach (not required when using Service Role):
 - If you want to allow anon inserts instead (not recommended), create a permissive RLS policy on public.weekly_reports:
   Example policy (allow when header x-user-id equals body.user_id):
