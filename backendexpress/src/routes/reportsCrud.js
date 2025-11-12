@@ -5,6 +5,7 @@ const controller = require('../controllers/reportsController');
 const selfTestController = require('../controllers/reportsSelfTest');
 const reportsDiagnosticsController = require('../controllers/reportsControllerDiagnostics');
 const reportsUserCheckController = require('../controllers/reportsUserCheck');
+const reportsUserRawCheckController = require('../controllers/reportsUserRawCheck');
 
 const router = express.Router();
 
@@ -19,6 +20,34 @@ const router = express.Router();
 
 // Diagnostics BEFORE any "/:id"
 router.get('/api/reports/diagnostics', reportsDiagnosticsController.get.bind(reportsDiagnosticsController));
+
+/**
+ * @swagger
+ * /api/reports/users/{userId}/raw-check:
+ *   get:
+ *     summary: Raw diagnostic check against auth.users via service-role client
+ *     description: >
+ *       Executes a schema-targeted query using client.schema('auth').from('users').select('id', { head: false, count: 'exact' }).eq('id', userId).limit(2)
+ *       and returns { found, count, rows (ids), host, notes, query }. Surfaces Supabase error object fields safely if any.
+ *     tags: [WeeklyReports]
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The auth.users UUID to check (no implicit casting; direct eq on id).
+ *     responses:
+ *       200:
+ *         description: Diagnostic payload with query results (even if not found)
+ *       400:
+ *         description: Missing or invalid userId param
+ *       503:
+ *         description: Supabase not configured
+ *       500:
+ *         description: Unexpected server error
+ */
+router.get('/api/reports/users/:userId/raw-check', reportsUserRawCheckController.rawCheck.bind(reportsUserRawCheckController));
 
 // Users existence check BEFORE any "/:id"
 router.get('/api/reports/users/:userId/check', reportsUserCheckController.check.bind(reportsUserCheckController));
@@ -37,6 +66,7 @@ router.get('/api/reports/users/:userId/check', reportsUserCheckController.check.
 router.get('/api/reports/routes-check', (req, res) => {
   const routes = [
     'GET /api/reports/diagnostics',
+    'GET /api/reports/users/:userId/raw-check',
     'GET /api/reports/users/:userId/check',
     'GET /api/reports/routes-check',
     'POST /api/reports/selftest',

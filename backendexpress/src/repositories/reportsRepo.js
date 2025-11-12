@@ -122,15 +122,16 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
         ok: false,
         status: 400,
         error: `Failed to verify user in auth.users: ${existErr}`,
-        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, ...existDiag } } : {}),
+        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, error: existErr, ...existDiag } } : {}),
       };
     }
     if (!exists) {
+      // Temporarily include count and error details when not found to surface via POST /api/reports
       return {
         ok: false,
         status: 400,
         error: 'User not found in auth.users for provided userId. Ensure the user exists in Supabase Auth and try again.',
-        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, ...existDiag } } : {}),
+        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, error: existErr || null, ...existDiag } } : {}),
       };
     }
 
