@@ -38,42 +38,50 @@ RLS and inserts to weekly_reports:
   2) Check /api/health/supabase for configured=true and keySource=SUPABASE_SERVICE_ROLE_KEY.
   3) Use the self-test below to confirm server-side inserts work.
 
-Self-test endpoint:
+Self-test endpoint (updated):
 - POST /api/reports/selftest
-  - Optional body: { "userId": "<existing-auth-users-uuid>" }
-  - If userId is provided, the self-test verifies it exists in auth.users; proceeds only if found.
-  - If not provided, the endpoint returns 400 with guidance to pass a valid user id from auth.users.
+  - Body: { "userId": "<existing-auth.users-uuid>" } (required)
+  - The endpoint trims the UUID, validates it, and verifies it exists in auth.users (schema-targeted) before inserting.
   - Returns 201 when a report is inserted using the provided auth.users id.
-  - Use this to verify server-side inserts (service role) and that your weekly_reports.user_id FK to auth.users works.
+  - Returns 400 with structured diagnostics if the user is missing in auth.users or the UUID is invalid.
+  - This confirms server-side inserts (service role) and validates your weekly_reports.user_id FK to auth.users.
 
 Auth schema targeting (auth.users):
-- The backend must query Supabase Auth's "auth.users" table using the "auth" schema. We configure the Supabase client to support schema-targeted queries and use a head+count existence check to avoid selecting PII.
-- If your project restricts REST access to the auth schema, ensure the backend is using the Service Role key. We never log secrets. Diagnostics may log the Supabase URL host and whether count=1.
-- If you see "User not found in auth.users" for an id you know exists, verify:
-  1) SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set in backend .env.
-  2) The id is exactly the UUID from Auth (auth.users.id).
-  3) /api/health/supabase shows configured=true.
-  4) Try POST /api/reports with that userId again. The backend now explicitly targets schema('auth') for existence checks.
+- The backend queries Supabase Auth's "auth.users" using client.schema('auth').from('users') with head+count existence checks (no PII selection).
+- Diagnostics include:
+  - Supabase host (from SUPABASE_URL)
+  - schema path: "auth.users"
+  - Whether the existence check returned count=1
+- Ensure your backend is configured with the Service Role key. If PostgREST restricts auth schema under anon, service role bypasses that.
 
-Optional policy approach (not required when using Service Role):
-- If you want to allow anon inserts instead (not recommended), create a permissive RLS policy on public.weekly_reports:
-  Example policy (allow when header x-user-id equals body.user_id):
-  1) Ensure your Supabase project is configured to forward request headers to PostgREST. Then run:
-     -- Enable RLS
-     ALTER TABLE public.weekly_reports ENABLE ROW LEVEL SECURITY;
-     -- Create policy allowing insert when provided header matches inserted user_id
-     CREATE POLICY allow_insert_when_header_matches_user
-       ON public.weekly_reports
-       FOR INSERT
-       TO anon
-       WITH CHECK (
-         current_setting('request.headers', true)::jsonb ->> 'x-user-id' = user_id
-       );
-  2) Update your reverse proxy to ensure the x-user-id header is forwarded.
-  Note: This approach should only be used if you cannot use the Service Role key. Prefer server-side service role.
+FK and table expectations:
+- weekly_reports.user_id must reference auth.users(id) (uuid).
+- The backend does NOT upsert into public.users. Ensure your DB migration defines weekly_reports with FK to auth.users.
+- Use service-role credentials (SUPABASE_SERVICE_ROLE_KEY) for all inserts/updates/deletes; anon key will hit RLS.
+
+Troubleshooting 400 on POST /api/reports:
+- The backend now:
+  1) Trims and validates userId as a UUID.
+  2) Uses the same service-role Supabase client instance for existence check and insert.
+  3) Targets auth schema explicitly: schema('auth').from('users').
+  4) Returns diagnostics on failure: { diag: { existenceSource: "auth.users", host, schema, path, count } } when DIAGNOSTICS=1.
+- Verify the userId is exactly the auth.users.id UUID.
+- Check /api/health/supabase for configured=true and a reachable host.
+- Try the provided test UUID:
+  391eb516-4e8e-43e8-84a4-5e24a8a3d1d6
+
+Troubleshooting 500 on /api/reports/selftest:
+- The self-test now requires a userId and will:
+  - Return 400 if auth.users does not contain the id (no upsert into public.users).
+  - Return 400 if UUID is invalid.
+  - Return 503 if Supabase is not configured.
+  - Return structured details on error, including the schema-qualified path and host.
+
+Diagnostics toggle:
+- Set DIAGNOSTICS=1 in the backend environment to include non-sensitive diagnostics in error responses for /api/reports and self-test.
 
 Files:
-- src/services/supabaseClient.js: central Supabase initialization and helpers
-- src/repositories/reportsRepo.js: Supabase-backed CRUD for weekly_reports
+- src/services/supabaseClient.js: central Supabase initialization and helpers (schema targeting, auth.users existence, UUID validation, diagnostics)
+- src/repositories/reportsRepo.js: Supabase-backed CRUD for weekly_reports (uses the same service client, trims/validates UUIDs, enhanced error diagnostics)
 - src/controllers/supabaseHealth.js: health probe
-- src/controllers/reportsSelfTest.js: self-test insert controller
+- src/controllers/reportsSelfTest.js: strict self-test insert controller (auth.users only)

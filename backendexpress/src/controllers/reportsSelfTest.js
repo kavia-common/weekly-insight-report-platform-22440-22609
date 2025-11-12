@@ -1,31 +1,32 @@
 'use strict';
 
 const repo = require('../repositories/reportsRepo');
-const { getClient, isConfigured } = require('../services/supabaseClient');
+const { isConfigured, authUsersExists, getSupabaseDiagnostics, isValidUUID } = require('../services/supabaseClient');
 
 /**
  * ReportsSelfTestController
  *
  * Self-test verifies that the server-side Supabase client (service role) can insert into weekly_reports.
  * It validates the foreign key on weekly_reports.user_id strictly against auth.users(id).
- * Behavior now:
- *  - Accepts a userId in the JSON body (optional but recommended). If provided, verifies it exists in auth.users.
- *  - If not provided, returns 400 advising to pass an existing userId from auth.users.
- * The response provides clear diagnostics on whether the user was found in auth.users.
+ * New behavior:
+ *  - Requires a userId in the JSON body; it must be a valid UUID and present in auth.users.
+ *  - Does not upsert into any public.users table (avoids mismatched FK assumptions).
+ *  - Returns structured diagnostics without leaking secrets.
  */
 class ReportsSelfTestController {
   // PUBLIC_INTERFACE
   /**
    * selfTestInsert
-   * Optional body: { userId?: string }
+   * Body: { userId: string }
    * Behavior:
-   *  - If userId provided: use it; if referenced user is not found in public.users, self-test will create it.
-   *  - If not provided: create or reuse a deterministic synthetic user row in public.users.
-   *  - Then insert a weekly_reports row for the current week using the service role client.
+   *  - Validates UUID format and trims whitespace.
+   *  - Confirms auth.users contains the userId via schema-targeted existence check.
+   *  - Inserts a weekly_reports row for the current week using the service role client via the repo.
    * Responses:
-   *  - 201 { ok: true, report, user: { id, existed, created } }
+   *  - 201 { ok: true, report }
+   *  - 400 on validation/existence failures (with diagnostics)
    *  - 503 when Supabase not configured
-   *  - 500 on DB errors
+   *  - 500 on unexpected errors
    */
   async selfTestInsert(req, res) {
     try {
@@ -36,61 +37,41 @@ class ReportsSelfTestController {
         });
       }
 
-      const client = getClient();
-      const today = new Date();
-      const weekISO = today.toISOString().slice(0, 10);
-      const providedUserId = (req.body && typeof req.body.userId === 'string') ? req.body.userId.trim() : undefined;
-      const fallbackUserId = '00000000-0000-0000-0000-000000000001';
-
-      // Helper: ensure a user exists in public.users, using service role client.
-      const ensureUser = async (id) => {
-        // Try select first
-        const { data: existing, error: selErr } = await client.from('users').select('id').eq('id', id).limit(1);
-        if (!selErr && Array.isArray(existing) && existing.length > 0) {
-          return { id, existed: true, created: false };
-        }
-        // If table missing, surface meaningful error
-        if (selErr && /relation .* does not exist/i.test(selErr.message || '')) {
-          throw new Error('Table "users" does not exist. Create public.users with primary key id to satisfy the foreign key, or adjust FK.');
-        }
-        // Upsert (insert with on conflict) - best effort
-        const upsertPayload = { id, email: `selftest+${id}@example.com`, name: 'SelfTest User', created_at: new Date().toISOString() };
-        const { data: upData, error: upErr } = await client.from('users').upsert(upsertPayload, { onConflict: 'id' }).select('id').single();
-        if (upErr) {
-          throw upErr;
-        }
-        return { id: upData.id || id, existed: false, created: true };
-      };
-
-      let userMeta;
-      if (providedUserId) {
-        // Try to ensure user exists; create if not
-        try {
-          userMeta = await ensureUser(providedUserId);
-        } catch (uErr) {
-          return res.status(500).json({
-            ok: false,
-            message: 'Failed to ensure provided user exists in users table.',
-            error: uErr && uErr.message ? uErr.message : String(uErr),
-          });
-        }
-      } else {
-        // Create or reuse synthetic user
-        try {
-          userMeta = await ensureUser(fallbackUserId);
-        } catch (uErr2) {
-          return res.status(500).json({
-            ok: false,
-            message: 'Failed to upsert synthetic self-test user in users table.',
-            error: uErr2 && uErr2.message ? uErr2.message : String(uErr2),
-          });
-        }
+      const userId = (req.body && typeof req.body.userId === 'string') ? req.body.userId.trim() : '';
+      if (!userId) {
+        return res.status(400).json({
+          ok: false,
+          message: 'Provide body: { "userId": "<existing-auth.users-uuid>" }',
+          diag: { hint: 'Fetch a UUID from your Supabase Auth users table and retry.' },
+        });
+      }
+      if (!isValidUUID(userId)) {
+        return res.status(400).json({
+          ok: false,
+          message: 'userId must be a valid UUID.',
+        });
       }
 
-      // Insert report using repo (which uses the service client)
+      const chk = await authUsersExists(userId);
+      if (chk.error) {
+        return res.status(400).json({
+          ok: false,
+          message: `Unable to verify user in auth.users: ${chk.error}`,
+          diag: { ...chk.diag, count: chk.count },
+        });
+      }
+      if (!chk.exists) {
+        return res.status(400).json({
+          ok: false,
+          message: 'User not found in auth.users. Provide a valid existing auth.users id.',
+          diag: { ...chk.diag, count: chk.count },
+        });
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
       const result = await repo.createReport({
-        userId: userMeta.id,
-        weekOf: weekISO,
+        userId,
+        weekOf: today,
         content: 'self-test insert',
         blockers: '',
         plans: '',
@@ -102,16 +83,21 @@ class ReportsSelfTestController {
           ok: false,
           message: 'Self-test insert failed',
           error: result.error,
-          diag: result.diag,
-          user: userMeta,
+          diag: {
+            ...result.diag,
+            supabase: getSupabaseDiagnostics(),
+          },
         });
       }
 
       return res.status(201).json({
         ok: true,
         message: 'Self-test succeeded using service role client',
-        user: userMeta,
         report: result.data,
+        diag: {
+          supabase: getSupabaseDiagnostics(),
+          authUsers: { exists: true, count: chk.count, path: chk.diag?.path, schema: chk.diag?.schema },
+        },
       });
     } catch (err) {
       return res.status(500).json({

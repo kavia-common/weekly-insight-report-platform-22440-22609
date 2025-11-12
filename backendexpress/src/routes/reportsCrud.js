@@ -3,6 +3,7 @@
 const express = require('express');
 const controller = require('../controllers/reportsController');
 const selfTestController = require('../controllers/reportsSelfTest');
+const reportsDiagnosticsController = require('../controllers/reportsControllerDiagnostics');
 
 const router = express.Router();
 
@@ -58,26 +59,28 @@ router.post('/api/reports', controller.create.bind(controller));
  *     summary: Self-test insert (service role)
  *     description: >
  *       Attempts to insert a test report using the server-side Supabase service role client.
- *       Optionally accepts a userId in the body to use for the insert. If not provided, the endpoint will
- *       create or reuse a synthetic test user in public.users to satisfy the foreign key, then insert the report.
+ *       Requires an existing auth.users UUID (schema-targeted) and does not upsert into public.users.
  *     tags: [WeeklyReports]
  *     requestBody:
- *       required: false
+ *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [userId]
  *             properties:
  *               userId:
  *                 type: string
- *                 description: Optional userId to use for the self-test. If omitted, a synthetic user will be upserted.
+ *                 description: Existing UUID from auth.users to use for the self-test.
  *     responses:
  *       201:
- *         description: Self-test succeeded (user ensured/created and report inserted)
+ *         description: Self-test succeeded (report inserted)
+ *       400:
+ *         description: Invalid UUID or user not found in auth.users
  *       503:
  *         description: Supabase not configured
  *       500:
- *         description: Database error (e.g., table missing or other failure)
+ *         description: Unexpected server error
  */
 router.post('/api/reports/selftest', selfTestController.selfTestInsert.bind(selfTestController));
 
@@ -175,5 +178,18 @@ router.patch('/api/reports/:id', controller.patch.bind(controller));
  *       503: { description: Database not ready }
  */
 router.delete('/api/reports/:id', controller.remove.bind(controller));
+
+/**
+ * @swagger
+ * /api/reports/diagnostics:
+ *   get:
+ *     summary: Reports diagnostics
+ *     description: Returns non-sensitive diagnostics including SUPABASE_URL host and schema-qualified path used for auth.users checks.
+ *     tags: [WeeklyReports]
+ *     responses:
+ *       200:
+ *         description: Diagnostics payload
+ */
+router.get('/api/reports/diagnostics', reportsDiagnosticsController.get.bind(reportsDiagnosticsController));
 
 module.exports = router;

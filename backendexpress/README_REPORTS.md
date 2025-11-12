@@ -16,7 +16,7 @@ Read-only demo endpoints (in-memory):
 Supabase CRUD endpoints:
 - POST /api/reports
   - Body: { userId: string, weekOf: "YYYY-MM-DD", content?: string, blockers?: string, plans?: string }
-  - Validation: userId must reference an existing user row in auth.users(id). If not found in auth.users, returns 400 with a helpful message.
+  - Validation: userId must be a valid UUID and reference an existing row in auth.users(id). If not found, returns 400 with diagnostics (DIAGNOSTICS=1).
   - Field mapping: the request field "content" is stored in the database column "progress".
   - Returns 201 with created report when valid.
 - GET /api/reports/:id
@@ -87,10 +87,18 @@ Operational caveats:
 - If the SQL API is disabled in your environment, you may need to create a secure RPC function that executes the REFRESH command and grant execute permission to the service role.
 
 Examples (curl):
+- Diagnostics:
+  curl http://localhost:3000/api/reports/diagnostics
+
+- Self-test (requires an existing auth.users UUID):
+  curl -X POST http://localhost:3000/api/reports/selftest \
+    -H "Content-Type: application/json" \
+    -d '{"userId":"391eb516-4e8e-43e8-84a4-5e24a8a3d1d6"}'
+
 - Create:
   curl -X POST http://localhost:3000/api/reports \
     -H "Content-Type: application/json" \
-    -d '{"userId":"user-123","weekOf":"2025-01-06","content":"Shipped feature A","blockers":"None","plans":"Start feature B"}'
+    -d '{"userId":"391eb516-4e8e-43e8-84a4-5e24a8a3d1d6","weekOf":"2025-01-06","content":"Shipped feature A","blockers":"None","plans":"Start feature B"}'
 
 - Get by id:
   curl http://localhost:3000/api/reports/<id>

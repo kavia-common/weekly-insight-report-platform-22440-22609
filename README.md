@@ -16,7 +16,8 @@
 3) Verify configuration:
    - Visit /api/health/supabase
    - You should see configured=true and env flags with *_present true values (secrets are not printed).
-   - From Swagger (/docs), run POST /api/reports/selftest and expect 201. This confirms server-side inserts bypass RLS using the Service Role key.
+   - Visit /api/reports/diagnostics to see the effective SUPABASE_URL host and the schema-qualified path used for auth.users checks.
+   - From Swagger (/docs), run POST /api/reports/selftest with a valid auth.users UUID and expect 201. This confirms server-side inserts bypass RLS using the Service Role key.
 
 RLS note:
 - All backend inserts/updates/deletes for weekly_reports are performed with a server-side Supabase client initialized using SUPABASE_SERVICE_ROLE_KEY.

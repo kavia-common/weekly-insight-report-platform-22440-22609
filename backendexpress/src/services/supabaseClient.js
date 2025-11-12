@@ -13,6 +13,8 @@
  *  - healthCheck(): performs a minimal check against Supabase to validate connectivity and auth
  *  - refreshLatestUserReports(): triggers MV refresh via SQL API
  *  - authUsersExists(userId): robust existence check against auth.users(id), schema-targeted
+ *  - getSupabaseDiagnostics(): returns non-sensitive diagnostics (host, keySource)
+ *  - isValidUUID(v): validate UUID format
  *
  * Notes:
  * - Uses the Service Role key exclusively for server-side operations to bypass RLS.
@@ -20,6 +22,16 @@
  */
 
 const { createClient } = require('@supabase/supabase-js');
+
+// Helper: parse host safely
+function getUrlHost(url) {
+  try {
+    const u = new URL(url);
+    return u.host || '';
+  } catch {
+    return '';
+  }
+}
 
 // Resolve env on-demand to avoid stale values if dotenv loaded later
 function getEnv() {
@@ -94,14 +106,7 @@ function makeRealClient(url, key) {
    */
   // PUBLIC_INTERFACE
   client.schema = function schema(name) {
-    const baseHeaders = client.storage && client.storage.headers ? client.storage.headers : {};
-    const schemaHeaders = {
-      ...baseHeaders,
-      'Accept-Profile': name,
-      'Content-Profile': name,
-    };
-    // Create a new client instance that reuses the same URL/key but with overridden headers.
-    // We avoid persisting sessions or other differences.
+    // Build a new client with the same URL/key and schema-qualified headers
     return createClient(url, key, {
       auth: {
         persistSession: false,
@@ -110,7 +115,8 @@ function makeRealClient(url, key) {
       },
       global: {
         headers: {
-          ...schemaHeaders,
+          'Accept-Profile': name,
+          'Content-Profile': name,
           'X-Client-Info': 'weekly-insight-report-platform/backendexpress',
         },
       },
@@ -185,6 +191,22 @@ function getClient() {
 function isConfigured() {
   const { url, key } = getEnv();
   return Boolean(url && key);
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * getSupabaseDiagnostics
+ * Returns non-sensitive diagnostics about the current Supabase configuration.
+ */
+// PUBLIC_INTERFACE
+function getSupabaseDiagnostics() {
+  const { url } = getEnv();
+  return {
+    host: getUrlHost(url || ''),
+    keySource: process.env.SUPABASE_SERVICE_ROLE_KEY
+      ? 'SUPABASE_SERVICE_ROLE_KEY'
+      : (process.env.SUPABASE_KEY ? 'SUPABASE_KEY' : 'none'),
+  };
 }
 
 /**
@@ -320,10 +342,22 @@ async function refreshLatestUserReports({ concurrent = true } = {}) {
 
 /**
  * PUBLIC_INTERFACE
+ * isValidUUID
+ * Validate UUID string (v4 style). Trims input first.
+ */
+// PUBLIC_INTERFACE
+function isValidUUID(v) {
+  if (typeof v !== 'string') return false;
+  const s = v.trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+}
+
+/**
+ * PUBLIC_INTERFACE
  * authUsersExists
  * Robust existence check for a user id in auth.users schema.
  * Uses head+count exact query against schema('auth').from('users') to avoid selecting data.
- * Returns { exists: boolean, error?: string, count?: number }
+ * Returns { exists: boolean, error?: string, count?: number, diag?: { host, schema: string } }
  */
 // PUBLIC_INTERFACE
 async function authUsersExists(userId) {
@@ -333,21 +367,33 @@ async function authUsersExists(userId) {
   if (!userId || typeof userId !== 'string') {
     return { exists: false, error: 'invalid_user_id' };
   }
+  const trimmed = userId.trim();
   try {
     const base = getClient();
+    // Use the same client URL/headers; for schema targeting use Accept-Profile headers.
     const svc = base.schema('auth');
     const { count, error } = await svc
       .from('users')
       .select('id', { head: true, count: 'exact' })
-      .eq('id', userId)
+      .eq('id', trimmed)
       .limit(1);
 
+    const diag = {
+      host: getSupabaseDiagnostics().host,
+      schema: 'auth',
+      path: 'auth.users',
+    };
+
     if (error) {
-      return { exists: false, error: error.message || String(error) };
+      return { exists: false, error: error.message || String(error), count: undefined, diag };
     }
-    return { exists: count === 1, count: typeof count === 'number' ? count : undefined };
+    return { exists: count === 1, count: typeof count === 'number' ? count : undefined, diag };
   } catch (err) {
-    return { exists: false, error: err && err.message ? err.message : String(err) };
+    return {
+      exists: false,
+      error: err && err.message ? err.message : String(err),
+      diag: { host: getSupabaseDiagnostics().host, schema: 'auth', path: 'auth.users' },
+    };
   }
 }
 
@@ -357,6 +403,8 @@ module.exports = {
   healthCheck,
   refreshLatestUserReports,
   authUsersExists,
+  getSupabaseDiagnostics,
+  isValidUUID,
   // Expose a safe reference: callers that import and try .from without checking will get a clear error.
   clientOrDisabled: () => (isConfigured() ? getClient() : disabledClient),
 };

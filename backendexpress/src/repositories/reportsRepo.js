@@ -6,7 +6,7 @@
  *
  * Expected columns (minimal):
  *  - id: uuid (default)
- *  - user_id: text or uuid
+ *  - user_id: uuid (FK to auth.users(id))
  *  - week_of: date (ISO YYYY-MM-DD)
  *  - progress: text
  *  - blockers: text
@@ -16,7 +16,7 @@
  *
  * All methods return objects of shape:
  *  - { ok: true, data, ... } on success
- *  - { ok: false, status?, error } on error
+ *  - { ok: false, status?, error, diag? } on error
  *
  * Missing table or not-configured Supabase should be handled gracefully so API
  * can return 503 with a clear message.
@@ -29,21 +29,9 @@ function triggerRefreshLatestMV(preferConcurrent = true) {
   if (!supabaseService.isConfigured() || typeof supabaseService.refreshLatestUserReports !== 'function') {
     return;
   }
-  // Fire-and-forget; log any errors but don't disrupt main flow
   Promise.resolve()
     .then(() => supabaseService.refreshLatestUserReports(preferConcurrent))
-    .then((res) => {
-      // eslint-disable-next-line no-console
-      if (res && res.ok) {
-        console.log(`[mv-refresh] latest_user_reports refreshed (concurrent=${res.concurrent === true})`);
-      } else if (res && res.error) {
-        console.warn(`[mv-refresh] refresh attempt failed: ${res.error}`);
-      }
-    })
-    .catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn('[mv-refresh] refresh attempt threw:', err && err.message ? err.message : String(err));
-    });
+    .catch(() => {});
 }
 
 const TABLE = 'weekly_reports';
@@ -51,25 +39,16 @@ const TABLE = 'weekly_reports';
 // Map common Supabase error codes/messages to user-friendly messages/status.
 function normalizeDbError(err) {
   const message = (err && (err.message || err.msg)) ? (err.message || err.msg) : String(err);
-  // Detect missing table
   if (/relation .* does not exist/i.test(message) || /table .* does not exist/i.test(message)) {
-    return {
-      status: 503,
-      error: 'Database table "weekly_reports" is missing. Please run migrations.',
-    };
+    return { status: 503, error: 'Database table "weekly_reports" is missing. Please run migrations.' };
   }
-  // RLS violation hint
   if (/row-level security/i.test(message) || /violates row-level security/i.test(message)) {
     return {
       status: 500,
       error: `${message}. Hint: ensure the backend uses SUPABASE_SERVICE_ROLE_KEY (service role) and not the anon key. See README for RLS guidance.`,
     };
   }
-  // Include more context if available
-  const enriched = {
-    status: 500,
-    error: message,
-  };
+  const enriched = { status: 500, error: message };
   if (err && typeof err === 'object') {
     if (err.code) enriched.code = err.code;
     if (err.hint) enriched.hint = err.hint;
@@ -82,20 +61,17 @@ function normalizeDbError(err) {
 function sanitizeString(val) {
   if (val === undefined || val === null) return undefined;
   if (typeof val !== 'string') return String(val);
-  // Basic trim; escaping/HTML handling should be done at render layer. DB paramization avoids injection.
   return val.trim();
 }
 
 // Validate ISO date (YYYY-MM-DD) for weekOf
 function isISODate(val) {
   if (typeof val !== 'string') return false;
-  // Accept full date only, not datetime
   return /^\d{4}-\d{2}-\d{2}$/.test(val);
 }
 
 // Helper to get a known service-role client (never request-scoped)
 function getServiceClient() {
-  // Intentional: do NOT use any req-scoped auth; always use server service client to bypass RLS for trusted ops
   return supabaseService.getClient();
 }
 
@@ -105,25 +81,20 @@ const DIAGNOSTICS = process.env.DIAGNOSTICS === '1';
 // PUBLIC_INTERFACE
 async function createReport({ userId, weekOf, content, blockers, plans }) {
   if (!supabaseService.isConfigured()) {
-    return {
-      ok: false,
-      status: 503,
-      error:
-        'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-    };
+    return { ok: false, status: 503, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
   }
-  if (!userId || !isISODate(weekOf)) {
-    return {
-      ok: false,
-      status: 400,
-      error: 'Invalid payload: userId (string) and weekOf (YYYY-MM-DD) are required.',
-    };
+  const trimmedUserId = sanitizeString(userId);
+  if (!trimmedUserId || !isISODate(weekOf)) {
+    return { ok: false, status: 400, error: 'Invalid payload: userId (string) and weekOf (YYYY-MM-DD) are required.' };
+  }
+  // UUID validation + trimming to avoid hidden whitespace issues
+  if (!supabaseService.isValidUUID(trimmedUserId)) {
+    return { ok: false, status: 400, error: 'userId must be a valid UUID.' };
   }
 
   const row = {
-    user_id: sanitizeString(userId),
+    user_id: trimmedUserId,
     week_of: weekOf,
-    // API accepts 'content' as an alias; persist into 'progress' column
     progress: sanitizeString(content) || '',
     blockers: sanitizeString(blockers) || '',
     plans: sanitizeString(plans) || '',
@@ -131,110 +102,43 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
 
   try {
     const client = getServiceClient();
-    // Temporary diagnostics: confirm we are not using a user session
-    // eslint-disable-next-line no-console
-    console.log('[reportsRepo] Using service client for createReport (no request-scoped auth).');
-
-    // 1) Schema existence/lightweight read check for our target table
+    // Preflight table existence
     const preflight = await client.from(TABLE).select('id').limit(1);
     if (preflight.error) {
       const norm = normalizeDbError(preflight.error);
-      return {
-        ok: false,
-        status: norm.status,
-        error: norm.error,
-        ...(DIAGNOSTICS ? { diag: { stage: 'preflight_select', ...norm } } : {}),
-      };
+      return { ok: false, status: norm.status, error: norm.error, ...(DIAGNOSTICS ? { diag: { stage: 'preflight_select', ...norm } } : {}) };
     }
 
-    // 1b) Verify the referenced user exists in auth.users using schema-targeted head+count query
-    let userExists = false;
-    let existenceSource = 'auth.users';
-    let existenceDiag = {};
-    try {
-      const { exists, count, error: existErr } = await supabaseService.authUsersExists(userId);
-      userExists = exists === true;
-      existenceDiag = {
-        count: typeof count === 'number' ? count : undefined,
-        error: existErr || undefined,
-      };
-    } catch (e2) {
-      existenceDiag = { error: e2 && e2.message ? e2.message : String(e2) };
-    }
-
-    // Debug logging toggle via DEBUG or DIAGNOSTICS env
-    const DEBUG = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development' || DIAGNOSTICS;
-    if (DEBUG) {
-      // eslint-disable-next-line no-console
-      const url = process.env.SUPABASE_URL || '';
-      const host = (() => {
-        try {
-          const u = new URL(url);
-          return u.host || '';
-        } catch (_) {
-          return '';
-        }
-      })();
-      console.log(`[reportsRepo] auth.users existence check -> exists=${userExists} count=${existenceDiag.count ?? 'n/a'} host=${host}`);
-      if (existenceDiag.error) {
-        console.warn('[reportsRepo] existence check error (non-fatal if RLS-restricted):', existenceDiag.error);
-      }
-    }
-
-    if (!userExists) {
+    // Verify user exists in auth.users with schema-qualified existence check; include diagnostics
+    const { exists, count, error: existErr, diag: existDiag } = await supabaseService.authUsersExists(trimmedUserId);
+    if (existErr) {
+      // Include diagnostics to help operators (host, schema, path)
       return {
         ok: false,
         status: 400,
-        error:
-          'User not found in auth.users for provided userId. Ensure the user exists in Supabase Auth and try again.',
-        ...(DIAGNOSTICS ? { diag: { existenceSource, ...existenceDiag } } : {}),
+        error: `Failed to verify user in auth.users: ${existErr}`,
+        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, ...existDiag } } : {}),
+      };
+    }
+    if (!exists) {
+      return {
+        ok: false,
+        status: 400,
+        error: 'User not found in auth.users for provided userId. Ensure the user exists in Supabase Auth and try again.',
+        ...(DIAGNOSTICS ? { diag: { existenceSource: 'auth.users', count, ...existDiag } } : {}),
       };
     }
 
-    // 2) Server-side context diagnostics via RPC (best-effort)
-    let rpcDiag = {};
-    try {
-      const { data: uidData, error: uidErr } = await client.rpc('auth_uid'); // will error if function not present
-      const { data: isAdminData, error: isAdminErr } = await client.rpc('is_admin', { user_id: uidData || null });
-      rpcDiag = {
-        auth_uid: uidErr ? 'unavailable' : uidData,
-        is_admin: isAdminErr ? 'unavailable' : isAdminData,
-      };
-    } catch (e) {
-      rpcDiag = { note: 'rpc diagnostics unavailable' };
-    }
-
-    // 3) Attempt insert
+    // Attempt insert using the same service-role client instance
     const { data, error } = await client.from(TABLE).insert(row).select('*').single();
     if (error) {
       const norm = normalizeDbError(error);
-      return {
-        ok: false,
-        status: norm.status,
-        error: norm.error,
-        ...(DIAGNOSTICS ? { diag: { stage: 'insert', ...norm, rpc: rpcDiag } } : {}),
-      };
+      return { ok: false, status: norm.status, error: norm.error, ...(DIAGNOSTICS ? { diag: { stage: 'insert', ...norm } } : {}) };
     }
 
-    // Non-blocking refresh; prefer concurrent path
-    try {
-      Promise.resolve()
-        .then(() => supabaseService.refreshLatestUserReports({ concurrent: true }))
-        .then((r) => {
-          if (!r || !r.success) {
-            // eslint-disable-next-line no-console
-            console.warn('[mv-refresh] create -> refresh failed:', r && r.error);
-          }
-        })
-        .catch((e) => {
-          // eslint-disable-next-line no-console
-          console.warn('[mv-refresh] create -> refresh threw:', e && e.message ? e.message : String(e));
-        });
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('[mv-refresh] create -> trigger error:', e && e.message ? e.message : String(e));
-    }
-    return { ok: true, data, ...(DIAGNOSTICS ? { diag: { rpc: rpcDiag } } : {}) };
+    // Trigger MV refresh (best effort)
+    triggerRefreshLatestMV(true);
+    return { ok: true, data, ...(DIAGNOSTICS ? { diag: { existence: { count, ...existDiag } } } : {}) };
   } catch (err) {
     const norm = normalizeDbError(err);
     return { ok: false, status: norm.status, error: norm.error };
@@ -244,20 +148,11 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
 // PUBLIC_INTERFACE
 async function getReportById(id) {
   if (!supabaseService.isConfigured()) {
-    return {
-      ok: false,
-      status: 503,
-      error:
-        'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-    };
+    return { ok: false, status: 503, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
   }
-  if (!id) {
-    return { ok: false, status: 400, error: 'Report id is required.' };
-  }
+  if (!id) return { ok: false, status: 400, error: 'Report id is required.' };
   try {
     const client = getServiceClient();
-    // eslint-disable-next-line no-console
-    console.log('[reportsRepo] Using service client for getReportById.');
     const { data, error } = await client.from(TABLE).select('*').eq('id', id).single();
     if (error) {
       const norm = normalizeDbError(error);
@@ -273,16 +168,9 @@ async function getReportById(id) {
 // PUBLIC_INTERFACE
 async function listReportsByUser({ userId, page = 1, pageSize = 20 }) {
   if (!supabaseService.isConfigured()) {
-    return {
-      ok: false,
-      status: 503,
-      error:
-        'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-    };
+    return { ok: false, status: 503, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
   }
-  if (!userId) {
-    return { ok: false, status: 400, error: 'userId is required.' };
-  }
+  if (!userId) return { ok: false, status: 400, error: 'userId is required.' };
   const p = Number(page) || 1;
   const ps = Math.min(100, Math.max(1, Number(pageSize) || 20));
   const from = (p - 1) * ps;
@@ -290,12 +178,10 @@ async function listReportsByUser({ userId, page = 1, pageSize = 20 }) {
 
   try {
     const client = getServiceClient();
-    // eslint-disable-next-line no-console
-    console.log('[reportsRepo] Using service client for listReportsByUser.');
     const { data, error, count } = await client
       .from(TABLE)
       .select('*', { count: 'exact' })
-      .eq('user_id', userId)
+      .eq('user_id', sanitizeString(userId))
       .order('week_of', { ascending: false })
       .range(from, to);
 
@@ -303,13 +189,7 @@ async function listReportsByUser({ userId, page = 1, pageSize = 20 }) {
       const norm = normalizeDbError(error);
       return { ok: false, status: norm.status, error: norm.error };
     }
-    return {
-      ok: true,
-      data: data || [],
-      page: p,
-      pageSize: ps,
-      total: typeof count === 'number' ? count : undefined,
-    };
+    return { ok: true, data: data || [], page: p, pageSize: ps, total: typeof count === 'number' ? count : undefined };
   } catch (err) {
     const norm = normalizeDbError(err);
     return { ok: false, status: norm.status, error: norm.error };
@@ -319,57 +199,29 @@ async function listReportsByUser({ userId, page = 1, pageSize = 20 }) {
 // PUBLIC_INTERFACE
 async function updateReport(id, patch) {
   if (!supabaseService.isConfigured()) {
-    return {
-      ok: false,
-      status: 503,
-      error:
-        'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-    };
+    return { ok: false, status: 503, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
   }
   if (!id || !patch || typeof patch !== 'object') {
     return { ok: false, status: 400, error: 'id and patch object are required.' };
   }
   const payload = {};
   if (patch.weekOf !== undefined) {
-    if (!isISODate(patch.weekOf)) {
-      return { ok: false, status: 400, error: 'weekOf must be YYYY-MM-DD.' };
-    }
+    if (!isISODate(patch.weekOf)) return { ok: false, status: 400, error: 'weekOf must be YYYY-MM-DD.' };
     payload.week_of = patch.weekOf;
   }
-  // API accepts 'content' as alias; update DB 'progress' column
   if (patch.content !== undefined) payload.progress = sanitizeString(patch.content);
   if (patch.blockers !== undefined) payload.blockers = sanitizeString(patch.blockers);
   if (patch.plans !== undefined) payload.plans = sanitizeString(patch.plans);
-  // Optionally update updated_at via DB trigger; if not available, set here:
   payload.updated_at = new Date().toISOString();
 
   try {
     const client = getServiceClient();
-    // eslint-disable-next-line no-console
-    console.log('[reportsRepo] Using service client for updateReport.');
     const { data, error } = await client.from(TABLE).update(payload).eq('id', id).select('*').single();
     if (error) {
       const norm = normalizeDbError(error);
       return { ok: false, status: norm.status, error: norm.error };
     }
-    // Fire-and-forget refresh
-    try {
-      Promise.resolve()
-        .then(() => supabaseService.refreshLatestUserReports({ concurrent: true }))
-        .then((r) => {
-          if (!r || !r.success) {
-            // eslint-disable-next-line no-console
-            console.warn('[mv-refresh] update -> refresh failed:', r && r.error);
-          }
-        })
-        .catch((e) => {
-          // eslint-disable-next-line no-console
-          console.warn('[mv-refresh] update -> refresh threw:', e && e.message ? e.message : String(e));
-        });
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('[mv-refresh] update -> trigger error:', e && e.message ? e.message : String(e));
-    }
+    triggerRefreshLatestMV(true);
     return { ok: true, data };
   } catch (err) {
     const norm = normalizeDbError(err);
@@ -380,43 +232,17 @@ async function updateReport(id, patch) {
 // PUBLIC_INTERFACE
 async function deleteReport(id) {
   if (!supabaseService.isConfigured()) {
-    return {
-      ok: false,
-      status: 503,
-      error:
-        'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-    };
+    return { ok: false, status: 503, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
   }
-  if (!id) {
-    return { ok: false, status: 400, error: 'Report id is required.' };
-  }
+  if (!id) return { ok: false, status: 400, error: 'Report id is required.' };
   try {
     const client = getServiceClient();
-    // eslint-disable-next-line no-console
-    console.log('[reportsRepo] Using service client for deleteReport.');
     const { error } = await client.from(TABLE).delete().eq('id', id);
     if (error) {
       const norm = normalizeDbError(error);
       return { ok: false, status: norm.status, error: norm.error };
     }
-    // Fire-and-forget refresh
-    try {
-      Promise.resolve()
-        .then(() => supabaseService.refreshLatestUserReports({ concurrent: true }))
-        .then((r) => {
-          if (!r || !r.success) {
-            // eslint-disable-next-line no-console
-            console.warn('[mv-refresh] delete -> refresh failed:', r && r.error);
-          }
-        })
-        .catch((e) => {
-          // eslint-disable-next-line no-console
-          console.warn('[mv-refresh] delete -> refresh threw:', e && e.message ? e.message : String(e));
-        });
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('[mv-refresh] delete -> trigger error:', e && e.message ? e.message : String(e));
-    }
+    triggerRefreshLatestMV(true);
     return { ok: true, data: { id } };
   } catch (err) {
     const norm = normalizeDbError(err);
@@ -427,12 +253,7 @@ async function deleteReport(id) {
 // PUBLIC_INTERFACE
 async function listRecentReports({ page = 1, pageSize = 20 } = {}) {
   if (!supabaseService.isConfigured()) {
-    return {
-      ok: false,
-      status: 503,
-      error:
-        'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-    };
+    return { ok: false, status: 503, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
   }
   const p = Number(page) || 1;
   const ps = Math.min(100, Math.max(1, Number(pageSize) || 20));
@@ -441,8 +262,6 @@ async function listRecentReports({ page = 1, pageSize = 20 } = {}) {
 
   try {
     const client = getServiceClient();
-    // eslint-disable-next-line no-console
-    console.log('[reportsRepo] Using service client for listRecentReports.');
     const { data, error, count } = await client
       .from(TABLE)
       .select('*', { count: 'exact' })
@@ -453,13 +272,7 @@ async function listRecentReports({ page = 1, pageSize = 20 } = {}) {
       const norm = normalizeDbError(error);
       return { ok: false, status: norm.status, error: norm.error };
     }
-    return {
-      ok: true,
-      data: data || [],
-      page: p,
-      pageSize: ps,
-      total: typeof count === 'number' ? count : undefined,
-    };
+    return { ok: true, data: data || [], page: p, pageSize: ps, total: typeof count === 'number' ? count : undefined };
   } catch (err) {
     const norm = normalizeDbError(err);
     return { ok: false, status: norm.status, error: norm.error };
@@ -484,14 +297,9 @@ async function __debugVerifyAndInsertExample() {
 }
 
 module.exports = {
-  // legacy placeholder retained (not used by new routes)
   tryFetchSample: async () => {
     if (!supabaseService.isConfigured()) {
-      return {
-        ok: false,
-        error:
-          'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-      };
+      return { ok: false, error: 'Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.' };
     }
     try {
       const client = supabaseService.getClient();
@@ -509,6 +317,5 @@ module.exports = {
   updateReport,
   deleteReport,
   listRecentReports,
-  // Guarded export for debugging/local verification
   __debugVerifyAndInsertExample: process.env.NODE_ENV !== 'production' ? __debugVerifyAndInsertExample : undefined,
 };
