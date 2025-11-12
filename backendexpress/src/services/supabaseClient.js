@@ -106,6 +106,11 @@ let cachedUrl = null;
  * Returns a Supabase client if configured; otherwise throws an informative error.
  */
 /** PUBLIC_INTERFACE */
+/**
+ * getClient
+ * Returns an initialized Supabase client using service role credentials.
+ * Throws an informative error if not configured.
+ */
 function getClient() {
   const { url, key } = getEnv();
   if (!url || !key) {
@@ -128,6 +133,11 @@ function getClient() {
  * Returns true if both SUPABASE_URL and a service role key env var are present.
  */
 /** PUBLIC_INTERFACE */
+/**
+ * isConfigured
+ * Indicates whether SUPABASE_URL and a service key are present.
+ * Returns boolean.
+ */
 function isConfigured() {
   const { url, key } = getEnv();
   return Boolean(url && key);
@@ -144,6 +154,11 @@ function isConfigured() {
  * Adds diag: keySource to show which env var provided the key.
  */
 /** PUBLIC_INTERFACE */
+/**
+ * healthCheck
+ * Lightweight connectivity check to Supabase edge using provided credentials.
+ * Does not leak secrets; returns status booleans and minimal diagnostics.
+ */
 async function healthCheck() {
   const { url, key } = getEnv();
   const keySource = process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SUPABASE_SERVICE_ROLE_KEY' : (process.env.SUPABASE_KEY ? 'SUPABASE_KEY' : 'none');
@@ -200,6 +215,12 @@ async function healthCheck() {
  * @returns {Promise<{success: boolean, concurrentUsed?: boolean, error?: string}>}
  */
 /** PUBLIC_INTERFACE */
+/**
+ * refreshLatestUserReports
+ * Attempts to refresh public.latest_user_reports materialized view via SQL API.
+ * @param {{concurrent?: boolean}} options
+ * @returns {Promise<{success: boolean, concurrentUsed?: boolean, error?: string}>}
+ */
 async function refreshLatestUserReports({ concurrent = true } = {}) {
   const { url, key } = getEnv();
   if (!url || !key) {
