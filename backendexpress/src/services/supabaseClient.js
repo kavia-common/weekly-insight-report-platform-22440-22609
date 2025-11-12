@@ -8,17 +8,19 @@
  * Also supports SUPABASE_KEY as a backward-compatible alias for the service role key.
  *
  * Exports:
- *  - getClient(): returns a verified supabase client or throws if not configured
+ *  - getClient(): default client for public schema operations
+ *  - getAuthClient(): explicit client bound to auth schema (preferred for auth.users queries)
  *  - isConfigured(): boolean indicating if env vars are present
  *  - healthCheck(): performs a minimal check against Supabase to validate connectivity and auth
  *  - refreshLatestUserReports(): triggers MV refresh via SQL API
  *  - authUsersExists(userId): robust existence check against auth.users(id), schema-targeted
  *  - getSupabaseDiagnostics(): returns non-sensitive diagnostics (host, keySource)
  *  - isValidUUID(v): validate UUID format
+ *  - selfSchemaCheck(): internal check to verify both header-based and db.schema-based targeting work
  *
  * Notes:
  * - Uses the Service Role key exclusively for server-side operations to bypass RLS.
- * - Adds global schema targeting support with supabase-js v2 via experimental schema() override.
+ * - supabase-js v2 supports db.schema for explicit schema binding; we prefer this for auth.users.
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -63,7 +65,7 @@ if (
   // Extra startup diagnostics: identify which key type is being used (service vs anon heuristic)
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
   const keyPrefix = typeof key === 'string' ? key.split('.')[0] : '';
-  const looksJwt = typeof key === 'string' && key.startsWith('ey'); // anon/service are both JWTs; we hint only
+  const looksJwt = typeof key === 'string' && key.startsWith('ey');
   // eslint-disable-next-line no-console
   console.log(
     `[supabase] Configuration detected. Using key from ${
@@ -75,13 +77,11 @@ if (
 }
 
 /**
- * Internal: Create a real supabase client when configured.
- * We attach a convenience .schema(name) method to select a schema by setting the PostgREST profile header.
- * This avoids relying on table name prefixes like 'auth.users'.
+ * Internal: create base client with default public schema headers and auth token.
+ * This client is used for public schema operations.
  */
-function makeRealClient(url, key) {
-  const client = createClient(url, key, {
-    // Server-side best practices
+function makeDefaultClient(url, key) {
+  return createClient(url, key, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
@@ -89,41 +89,38 @@ function makeRealClient(url, key) {
     },
     global: {
       headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
         'X-Client-Info': 'weekly-insight-report-platform/backendexpress',
-        // Explicitly set default schema to 'public' via PostgREST profile header
-        // We'll override when targeting auth schema using client.schema('auth')
         'Accept-Profile': 'public',
         'Content-Profile': 'public',
       },
     },
   });
+}
 
-  /**
-   * PUBLIC_INTERFACE
-   * schema(name)
-   * Returns a shallow wrapper that sends Accept-Profile/Content-Profile headers for a specific schema
-   * allowing .from('users') to target that schema.
-   */
-  // PUBLIC_INTERFACE
-  client.schema = function schema(name) {
-    // Build a new client with the same URL/key and schema-qualified headers
-    return createClient(url, key, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
+/**
+ * Internal: create an explicit auth schema client using db.schema='auth' and server headers.
+ */
+function makeAuthClient(url, key) {
+  // Create a client scoped to the 'auth' schema
+  return createClient(url, key, {
+    db: {
+      schema: 'auth',
+    },
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+    global: {
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'X-Client-Info': 'weekly-insight-report-platform/backendexpress',
       },
-      global: {
-        headers: {
-          'Accept-Profile': name,
-          'Content-Profile': name,
-          'X-Client-Info': 'weekly-insight-report-platform/backendexpress',
-        },
-      },
-    });
-  };
-
-  return client;
+    },
+  });
 }
 
 /**
@@ -147,22 +144,17 @@ const disabledClient = {
       '[supabase] Client is not configured. Ensure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set.'
     );
   },
-  schema() {
-    throw new Error(
-      '[supabase] Client is not configured. Schema targeting unavailable.'
-    );
-  }
 };
 
-let cachedClient = null;
+let cachedDefault = null;
+let cachedAuth = null;
 let cachedKey = null;
 let cachedUrl = null;
 
 /**
  * PUBLIC_INTERFACE
  * getClient
- * Returns an initialized Supabase client using service role credentials.
- * Throws an informative error if not configured.
+ * Returns the default Supabase client (public schema).
  */
 // PUBLIC_INTERFACE
 function getClient() {
@@ -172,13 +164,35 @@ function getClient() {
       '[supabase] Not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
     );
   }
-  // Rebuild client if env changed since last creation
-  if (!cachedClient || cachedUrl !== url || cachedKey !== key) {
-    cachedClient = makeRealClient(url, key);
+  if (!cachedDefault || cachedUrl !== url || cachedKey !== key) {
+    cachedDefault = makeDefaultClient(url, key);
+    cachedAuth = makeAuthClient(url, key);
     cachedUrl = url;
     cachedKey = key;
   }
-  return cachedClient;
+  return cachedDefault;
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * getAuthClient
+ * Returns a Supabase client that targets the auth schema explicitly.
+ */
+// PUBLIC_INTERFACE
+function getAuthClient() {
+  const { url, key } = getEnv();
+  if (!url || !key) {
+    throw new Error(
+      '[supabase] Not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
+    );
+  }
+  if (!cachedAuth || cachedUrl !== url || cachedKey !== key) {
+    cachedDefault = makeDefaultClient(url, key);
+    cachedAuth = makeAuthClient(url, key);
+    cachedUrl = url;
+    cachedKey = key;
+  }
+  return cachedAuth;
 }
 
 /**
@@ -231,7 +245,6 @@ async function healthCheck() {
     };
   }
   try {
-    // Perform a NOOP GET to the Supabase REST root (this checks connectivity/token acceptance at edge)
     const resp = await fetch(url, {
       method: 'GET',
       headers: {
@@ -240,7 +253,7 @@ async function healthCheck() {
       },
     });
 
-    const okish = resp.status >= 200 && resp.status < 500; // 2xx/3xx/404 indicate reachable edge
+    const okish = resp.status >= 200 && resp.status < 500;
     return {
       ok: okish,
       configured: true,
@@ -280,7 +293,7 @@ async function refreshLatestUserReports({ concurrent = true } = {}) {
     'REFRESH MATERIALIZED VIEW CONCURRENTLY public.latest_user_reports;';
   const sqlNonConcurrent = 'REFRESH MATERIALIZED VIEW public.latest_user_reports;';
   try {
-    // Ensure env/keys are valid and client can be created
+    // Ensure env/keys are valid and clients can be created
     // eslint-disable-next-line no-unused-vars
     const client = getClient();
 
@@ -356,7 +369,7 @@ function isValidUUID(v) {
  * PUBLIC_INTERFACE
  * authUsersExists
  * Robust existence check for a user id in auth.users schema.
- * Uses head+count exact query against schema('auth').from('users') to avoid selecting data.
+ * Uses head+count exact query against getAuthClient().from('users') to avoid selecting data.
  * Returns { exists: boolean, error?: string, count?: number, diag?: { host, schema: string } }
  */
 // PUBLIC_INTERFACE
@@ -369,9 +382,7 @@ async function authUsersExists(userId) {
   }
   const trimmed = userId.trim();
   try {
-    const base = getClient();
-    // Use schema targeting via Accept-Profile/Content-Profile headers to explicitly query auth.users.
-    const svc = base.schema('auth');
+    const svc = getAuthClient();
     const { count, error } = await svc
       .from('users')
       .select('id', { head: true, count: 'exact' })
@@ -397,14 +408,78 @@ async function authUsersExists(userId) {
   }
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * selfSchemaCheck
+ * Performs two quick checks against auth.users:
+ *  1) Header-based Accept-Profile via default client with .from('users')
+ *  2) db.schema('auth') explicit client via getAuthClient()
+ * Returns which approach succeeds for diagnostics. Does not leak secrets.
+ */
+// PUBLIC_INTERFACE
+async function selfSchemaCheck(testUserId) {
+  const result = {
+    headerProfile: { ok: false, count: null, error: null },
+    dbSchemaAuth: { ok: false, count: null, error: null },
+  };
+  if (!isConfigured()) return result;
+  const { url, key } = getEnv();
+  try {
+    // Approach 1: Default client but force Accept-Profile=auth on a per-request basis via a temporary client
+    const acceptProfileClient = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: {
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          'Accept-Profile': 'auth',
+          'Content-Profile': 'auth',
+          'X-Client-Info': 'weekly-insight-report-platform/backendexpress/selfcheck',
+        },
+      },
+    });
+    const { count: c1, error: e1 } = await acceptProfileClient
+      .from('users')
+      .select('id', { head: true, count: 'exact' })
+      .eq('id', testUserId)
+      .limit(1);
+    result.headerProfile.ok = !e1;
+    result.headerProfile.count = typeof c1 === 'number' ? c1 : null;
+    result.headerProfile.error = e1 ? (e1.message || String(e1)) : null;
+  } catch (err1) {
+    result.headerProfile.ok = false;
+    result.headerProfile.error = err1 && err1.message ? err1.message : String(err1);
+  }
+
+  try {
+    // Approach 2: Explicit auth client
+    const svc = getAuthClient();
+    const { count: c2, error: e2 } = await svc
+      .from('users')
+      .select('id', { head: true, count: 'exact' })
+      .eq('id', testUserId)
+      .limit(1);
+    result.dbSchemaAuth.ok = !e2;
+    result.dbSchemaAuth.count = typeof c2 === 'number' ? c2 : null;
+    result.dbSchemaAuth.error = e2 ? (e2.message || String(e2)) : null;
+  } catch (err2) {
+    result.dbSchemaAuth.ok = false;
+    result.dbSchemaAuth.error = err2 && err2.message ? err2.message : String(err2);
+  }
+
+  return result;
+}
+
 module.exports = {
   getClient,
+  getAuthClient,
   isConfigured,
   healthCheck,
   refreshLatestUserReports,
   authUsersExists,
   getSupabaseDiagnostics,
   isValidUUID,
+  selfSchemaCheck,
   // Expose a safe reference: callers that import and try .from without checking will get a clear error.
   clientOrDisabled: () => (isConfigured() ? getClient() : disabledClient),
 };

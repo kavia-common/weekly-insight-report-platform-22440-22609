@@ -335,11 +335,18 @@ module.exports = {
       return { ok: false, status: 400, error: 'userId must be a valid UUID.' };
     }
     try {
+      // Prefer explicit auth client for reliability across Supabase versions
       const { exists, count, error, diag } = await supabaseService.authUsersExists(trimmed);
       if (error) {
         return { ok: false, status: 400, error: `Unable to verify user in auth.users: ${error}`, diag: { ...diag, count } };
       }
-      return { ok: true, found: !!exists, count: typeof count === 'number' ? count : undefined, diag };
+      // Include which mechanism is used in diagnostics for operators
+      return {
+        ok: true,
+        found: !!exists,
+        count: typeof count === 'number' ? count : undefined,
+        diag: { ...diag, mechanism: 'db.schema(auth)' }
+      };
     } catch (err) {
       const norm = normalizeDbError(err);
       return { ok: false, status: norm.status, error: norm.error };

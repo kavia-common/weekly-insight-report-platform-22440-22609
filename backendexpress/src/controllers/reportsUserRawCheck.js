@@ -1,6 +1,6 @@
 'use strict';
 
-const { isConfigured, getSupabaseDiagnostics, getClient } = require('../services/supabaseClient');
+const { isConfigured, getSupabaseDiagnostics, getClient, getAuthClient } = require('../services/supabaseClient');
 
 /**
  * ReportsUserRawCheckController
@@ -65,46 +65,57 @@ class ReportsUserRawCheckController {
         });
       }
 
+      // First attempt: Accept-Profile header approach via base.schema('auth')
       const base = getClient();
-      const svc = base.schema('auth'); // ensure Accept-Profile/Content-Profile headers target auth
-      // Execute full select to obtain rows (no UUID casting, direct eq against id)
-      const { data, error, count } = await svc
+      const svc = base.schema('auth');
+      const res1 = await svc
         .from('users')
         .select('id', { head: false, count: 'exact' })
         .eq('id', userId)
         .limit(2);
 
-      if (error) {
-        // Log concise error without secrets
-        // eslint-disable-next-line no-console
-        console.error('[raw-check] Supabase error:', {
-          message: error.message || String(error),
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
-        });
+      // Second attempt: explicit db.schema('auth') client
+      const authClient = getAuthClient();
+      const res2 = await authClient
+        .from('users')
+        .select('id', { head: false, count: 'exact' })
+        .eq('id', userId)
+        .limit(2);
 
-        return res.status(200).json({
-          found: false,
-          count: typeof count === 'number' ? count : null,
-          rows: Array.isArray(data) ? data.map(r => r && r.id).filter(Boolean) : [],
-          host,
-          error: error.message || String(error),
-          query: { schema: 'auth', table: 'users', eq: userId },
-          notes: 'Executed schema-targeted select against auth.users (no UUID casting). Returned error from Supabase.',
+      // Prefer a successful result among the two attempts
+      const pick = (r) => ({
+        ok: !r.error,
+        data: Array.isArray(r.data) ? r.data : [],
+        count: typeof r.count === 'number' ? r.count : null,
+        error: r.error ? (r.error.message || String(r.error)) : null,
+      });
+
+      const a = pick(res1);
+      const b = pick(res2);
+      const chosen = a.ok ? a : (b.ok ? b : a); // choose first ok else a (to report its error)
+
+      if (!a.ok && !b.ok) {
+        // eslint-disable-next-line no-console
+        console.error('[raw-check] Supabase errors', {
+          acceptProfile: a.error,
+          dbSchemaAuth: b.error,
         });
       }
 
-      const rows = Array.isArray(data) ? data.map(r => r && r.id).filter(Boolean) : [];
-      const found = typeof count === 'number' ? count > 0 : rows.length > 0;
+      const rows = chosen.data.map(r => r && r.id).filter(Boolean);
+      const found = chosen.count !== null ? chosen.count > 0 : rows.length > 0;
 
       return res.status(200).json({
         found,
-        count: typeof count === 'number' ? count : rows.length,
+        count: chosen.count !== null ? chosen.count : rows.length,
         rows,
         host,
         query: { schema: 'auth', table: 'users', eq: userId },
-        notes: 'Direct equality against auth.users.id using client.schema("auth") with { head: false, count: "exact" }.',
+        notes: 'Tried Accept-Profile schema("auth") and explicit db.schema("auth"); returns the first success.',
+        methods: {
+          acceptProfile: { ok: a.ok, count: a.count, error: a.error ? 'present' : null },
+          dbSchemaAuth: { ok: b.ok, count: b.count, error: b.error ? 'present' : null },
+        },
       });
     } catch (err) {
       return res.status(500).json({
