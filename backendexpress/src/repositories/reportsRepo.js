@@ -147,35 +147,60 @@ async function createReport({ userId, weekOf, content, blockers, plans }) {
       };
     }
 
-    // 1b) Verify the referenced user exists (to avoid FK violation). Check public.users first, then auth.users.
+    // 1b) Verify the referenced user exists (to avoid FK violation).
+    // Check public.users first, then auth.users (service-role client can access auth schema).
+    // Compare against the UUID/text string provided as userId.
     let userExists = false;
+    let existenceSource = 'none';
     try {
-      const { data: puData, error: puErr } = await client.from('users').select('id').eq('id', userId).limit(1);
+      const { data: puData, error: puErr } = await client
+        .from('users') // public schema default
+        .select('id')
+        .eq('id', userId)
+        .limit(1);
       if (!puErr && Array.isArray(puData)) {
         userExists = puData.length > 0;
+        if (userExists) existenceSource = 'public.users';
       } else if (puErr && /relation .* does not exist/i.test(puErr.message || '')) {
         // public.users table not present; continue to auth.users check
       }
     } catch (e) {
-      // ignore; try auth.users
+      // ignore; try auth.users next
     }
     if (!userExists) {
       try {
-        // Note: querying the auth schema via REST may not be available in all environments.
-        const { data: auData, error: auErr } = await client.from('auth.users').select('id').eq('id', userId).limit(1);
+        // IMPORTANT: correct fully-qualified table for auth schema is 'auth.users'
+        const { data: auData, error: auErr } = await client
+          .from('auth.users')
+          .select('id')
+          .eq('id', userId)
+          .limit(1);
         if (!auErr && Array.isArray(auData)) {
           userExists = auData.length > 0;
+          if (userExists) existenceSource = 'auth.users';
+        } else if (auErr && /permission denied|schema .* does not exist|relation .* does not exist/i.test(auErr.message || '')) {
+          // Some environments may restrict REST on auth schema; in such cases,
+          // rely on FK failure to surface a helpful error later.
         }
       } catch (e2) {
-        // ignore
+        // ignore; will error out below if not found
       }
     }
+
+    // Debug logging toggle via DEBUG or DIAGNOSTICS env
+    const DEBUG = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development' || DIAGNOSTICS;
+    if (DEBUG) {
+      // eslint-disable-next-line no-console
+      console.log(`[reportsRepo] user existence check -> exists=${userExists} source=${existenceSource} userId=${userId}`);
+    }
+
     if (!userExists) {
       return {
         ok: false,
         status: 400,
         error:
-          'User does not exist for provided userId. Provide a valid userId that exists in users/auth.users or create the user first.',
+          'User does not exist for provided userId. Provide a valid userId that exists in public.users or auth.users.',
+        ...(DIAGNOSTICS ? { diag: { existenceSource } } : {}),
       };
     }
 
@@ -454,6 +479,22 @@ async function listRecentReports({ page = 1, pageSize = 20 } = {}) {
   }
 }
 
+/**
+ * INTERNAL: quick verification used by operators to simulate a lookup and insert.
+ * Not exported publicly via routes; used for debugging in development/diagnostics.
+ */
+async function __debugVerifyAndInsertExample() {
+  const testUserId = '391eb516-4e8e-43e8-84a4-5e24a8a3d1d6';
+  const today = new Date().toISOString().slice(0, 10);
+  return createReport({
+    userId: testUserId,
+    weekOf: today,
+    content: 'debug verification insert',
+    blockers: '',
+    plans: '',
+  });
+}
+
 module.exports = {
   // legacy placeholder retained (not used by new routes)
   tryFetchSample: async () => {
@@ -480,4 +521,6 @@ module.exports = {
   updateReport,
   deleteReport,
   listRecentReports,
+  // Guarded export for debugging/local verification
+  __debugVerifyAndInsertExample: process.env.NODE_ENV !== 'production' ? __debugVerifyAndInsertExample : undefined,
 };
