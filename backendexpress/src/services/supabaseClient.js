@@ -13,7 +13,7 @@
  *  - isConfigured(): boolean indicating if env vars are present
  *  - healthCheck(): performs a minimal check against Supabase to validate connectivity and auth
  *  - refreshLatestUserReports(): triggers MV refresh via SQL API
- *  - authUsersExists(userId): robust existence check against auth.users(id), schema-targeted
+ *  - authUsersExists(userId): robust existence check against auth.users(id), with REST fallback
  *  - getSupabaseDiagnostics(): returns non-sensitive diagnostics (host, keySource)
  *  - isValidUUID(v): validate UUID format
  *  - selfSchemaCheck(): internal check to verify both header-based and db.schema-based targeting work
@@ -78,8 +78,9 @@ if (
 
 /**
  * Internal: create base client with default public schema headers and auth token.
- * This client is used for public schema operations.
+ * This client is used for public schema operations (public schema).
  */
+// PUBLIC_INTERFACE
 function makeDefaultClient(url, key) {
   return createClient(url, key, {
     auth: {
@@ -100,10 +101,11 @@ function makeDefaultClient(url, key) {
 }
 
 /**
- * Internal: create an explicit auth schema client using db.schema='auth' and server headers.
+ * Internal: create an explicit auth schema client using db.schema='auth' and required headers.
+ * We keep Authorization and apikey set explicitly to service role for PostgREST.
  */
+// PUBLIC_INTERFACE
 function makeAuthClient(url, key) {
-  // Create a client scoped to the 'auth' schema
   return createClient(url, key, {
     db: {
       schema: 'auth',
@@ -369,8 +371,9 @@ function isValidUUID(v) {
  * PUBLIC_INTERFACE
  * authUsersExists
  * Robust existence check for a user id in auth.users schema.
- * Uses head+count exact query against getAuthClient().from('users') to avoid selecting data.
- * Returns { exists: boolean, error?: string, count?: number, diag?: { host, schema: string } }
+ * Primary: supabase-js v2 authClient.from('users') with head+count exact
+ * Fallback: REST call to /rest/v1/users with Accept-Profile: auth
+ * Returns { exists: boolean, error?: string, count?: number, diag?: { host, schema: string, method: 'authClient'|'rest', primaryError?: string } }
  */
 // PUBLIC_INTERFACE
 async function authUsersExists(userId) {
@@ -381,7 +384,9 @@ async function authUsersExists(userId) {
     return { exists: false, error: 'invalid_user_id' };
   }
   const trimmed = userId.trim();
+  const { url, key } = getEnv();
   try {
+    // First try the explicit auth client (db.schema('auth'))
     const svc = getAuthClient();
     const { count, error } = await svc
       .from('users')
@@ -389,22 +394,74 @@ async function authUsersExists(userId) {
       .eq('id', trimmed)
       .limit(1);
 
-    const diag = {
+    const baseDiag = {
       host: getSupabaseDiagnostics().host,
       schema: 'auth',
       path: 'auth.users',
+      method: 'authClient',
     };
 
     if (error) {
-      return { exists: false, error: error.message || String(error), count: undefined, diag };
+      const primaryError = error.message || String(error);
+      // Fallback: direct REST call with Accept-Profile: auth
+      try {
+        const resp = await fetch(`${url}/rest/v1/users?id=eq.${encodeURIComponent(trimmed)}`, {
+          method: 'GET',
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            'Accept-Profile': 'auth',
+          },
+        });
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '');
+          return {
+            exists: false,
+            error: `REST fallback error ${resp.status} ${resp.statusText}: ${text}`,
+            diag: { ...baseDiag, method: 'rest', primaryError },
+          };
+        }
+        const rows = await resp.json().catch(() => []);
+        const cnt = Array.isArray(rows) ? rows.length : 0;
+        return { exists: cnt > 0, count: cnt, diag: { ...baseDiag, method: 'rest', primaryError } };
+      } catch (restErr) {
+        return {
+          exists: false,
+          error: `authClient error: ${primaryError}; REST fallback exception: ${restErr && restErr.message ? restErr.message : String(restErr)}`,
+          diag: { ...baseDiag, method: 'rest' },
+        };
+      }
     }
-    return { exists: count === 1, count: typeof count === 'number' ? count : undefined, diag };
+    return { exists: count === 1, count: typeof count === 'number' ? count : undefined, diag: baseDiag };
   } catch (err) {
-    return {
-      exists: false,
-      error: err && err.message ? err.message : String(err),
-      diag: { host: getSupabaseDiagnostics().host, schema: 'auth', path: 'auth.users' },
-    };
+    // If the auth client errors before query, attempt REST fallback directly
+    try {
+      const resp = await fetch(`${url}/rest/v1/users?id=eq.${encodeURIComponent(trimmed)}`, {
+        method: 'GET',
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          'Accept-Profile': 'auth',
+        },
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        return {
+          exists: false,
+          error: `authClient exception: ${err && err.message ? err.message : String(err)}; REST error ${resp.status} ${resp.statusText}: ${text}`,
+          diag: { host: getSupabaseDiagnostics().host, schema: 'auth', path: 'auth.users', method: 'rest' },
+        };
+      }
+      const rows = await resp.json().catch(() => []);
+      const cnt = Array.isArray(rows) ? rows.length : 0;
+      return { exists: cnt > 0, count: cnt, diag: { host: getSupabaseDiagnostics().host, schema: 'auth', path: 'auth.users', method: 'rest' } };
+    } catch (restErr) {
+      return {
+        exists: false,
+        error: `authClient exception: ${err && err.message ? err.message : String(err)}; REST fallback exception: ${restErr && restErr.message ? restErr.message : String(restErr)}`,
+        diag: { host: getSupabaseDiagnostics().host, schema: 'auth', path: 'auth.users', method: 'rest' },
+      };
+    }
   }
 }
 

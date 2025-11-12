@@ -15,23 +15,8 @@ const { isConfigured, getSupabaseDiagnostics, getClient, getAuthClient } = requi
  *
  * Behavior:
  * 1) Trims the provided userId (no UUID validation gate to allow checking raw behavior).
- * 2) Executes:
- *      client
- *        .schema('auth')
- *        .from('users')
- *        .select('id', { head: false, count: 'exact' })
- *        .eq('id', userId)
- *        .limit(2);
- * 3) Returns JSON:
- *      {
- *        found: boolean,
- *        count: number | null,
- *        rows: array of ids (max 2),
- *        host: string,
- *        notes: string,
- *        query: { schema: 'auth', table: 'users', eq: userId }
- *      }
- * 4) If Supabase returns error, logs a concise message and returns it in payload without secrets.
+ * 2) Executes preferred explicit db.schema('auth') client; on error, falls back to REST via Accept-Profile: auth.
+ * 3) Returns JSON indicating which method succeeded and includes error messages when both fail (no secrets).
  */
 class ReportsUserRawCheckController {
   // PUBLIC_INTERFACE
@@ -65,56 +50,92 @@ class ReportsUserRawCheckController {
         });
       }
 
-      // First attempt: Accept-Profile header approach via base.schema('auth')
-      const base = getClient();
-      const svc = base.schema('auth');
-      const res1 = await svc
-        .from('users')
-        .select('id', { head: false, count: 'exact' })
-        .eq('id', userId)
-        .limit(2);
+      const results = {
+        authClient: { ok: false, count: null, rows: [], error: null },
+        rest: { ok: false, count: null, rows: [], error: null },
+      };
 
-      // Second attempt: explicit db.schema('auth') client
-      const authClient = getAuthClient();
-      const res2 = await authClient
-        .from('users')
-        .select('id', { head: false, count: 'exact' })
-        .eq('id', userId)
-        .limit(2);
+      // Attempt 1: explicit auth client
+      try {
+        const authClient = getAuthClient();
+        const r = await authClient
+          .from('users')
+          .select('id', { head: false, count: 'exact' })
+          .eq('id', userId)
+          .limit(2);
+        if (!r.error) {
+          results.authClient.ok = true;
+          results.authClient.count = typeof r.count === 'number' ? r.count : null;
+          results.authClient.rows = Array.isArray(r.data) ? r.data.map(x => x && x.id).filter(Boolean) : [];
+        } else {
+          results.authClient.error = r.error.message || String(r.error);
+        }
+      } catch (e1) {
+        results.authClient.error = e1 && e1.message ? e1.message : String(e1);
+      }
 
-      // Prefer a successful result among the two attempts
-      const pick = (r) => ({
-        ok: !r.error,
-        data: Array.isArray(r.data) ? r.data : [],
-        count: typeof r.count === 'number' ? r.count : null,
-        error: r.error ? (r.error.message || String(r.error)) : null,
-      });
+      // Attempt 2: REST fallback if needed
+      if (!results.authClient.ok) {
+        try {
+          const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_KEY } = process.env;
+          const url = SUPABASE_URL;
+          const key = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_KEY;
+          const resp = await fetch(`${url}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, {
+            method: 'GET',
+            headers: {
+              apikey: key,
+              Authorization: `Bearer ${key}`,
+              'Accept-Profile': 'auth',
+            },
+          });
+          if (resp.ok) {
+            const rows = await resp.json().catch(() => []);
+            results.rest.ok = true;
+            results.rest.rows = Array.isArray(rows) ? rows.map(x => x && x.id).filter(Boolean) : [];
+            results.rest.count = Array.isArray(rows) ? rows.length : null;
+          } else {
+            const text = await resp.text().catch(() => '');
+            results.rest.error = `HTTP ${resp.status} ${resp.statusText}: ${text}`;
+          }
+        } catch (e2) {
+          results.rest.error = e2 && e2.message ? e2.message : String(e2);
+        }
+      }
 
-      const a = pick(res1);
-      const b = pick(res2);
-      const chosen = a.ok ? a : (b.ok ? b : a); // choose first ok else a (to report its error)
+      // Choose success precedence: authClient, then REST
+      const chosen = results.authClient.ok ? results.authClient : (results.rest.ok ? results.rest : null);
 
-      if (!a.ok && !b.ok) {
+      if (!chosen) {
         // eslint-disable-next-line no-console
-        console.error('[raw-check] Supabase errors', {
-          acceptProfile: a.error,
-          dbSchemaAuth: b.error,
+        console.error('[raw-check] Both methods failed', { authClient: results.authClient.error, rest: results.rest.error });
+        return res.status(200).json({
+          found: false,
+          count: 0,
+          rows: [],
+          host,
+          query: { schema: 'auth', table: 'users', eq: userId },
+          notes: 'Tried explicit auth schema client first; then REST fallback with Accept-Profile: auth.',
+          methods: {
+            authClient: { ok: false, count: null, error: results.authClient.error },
+            rest: { ok: false, count: null, error: results.rest.error },
+          },
         });
       }
 
-      const rows = chosen.data.map(r => r && r.id).filter(Boolean);
-      const found = chosen.count !== null ? chosen.count > 0 : rows.length > 0;
+      const found = (typeof chosen.count === 'number' ? chosen.count : chosen.rows.length) > 0;
+      const methodName = chosen === results.authClient ? 'authClient' : 'rest';
 
       return res.status(200).json({
         found,
-        count: chosen.count !== null ? chosen.count : rows.length,
-        rows,
+        count: typeof chosen.count === 'number' ? chosen.count : chosen.rows.length,
+        rows: chosen.rows,
         host,
         query: { schema: 'auth', table: 'users', eq: userId },
-        notes: 'Tried Accept-Profile schema("auth") and explicit db.schema("auth"); returns the first success.',
+        notes: 'Performed auth.users lookup using auth schema client; used REST fallback if needed.',
         methods: {
-          acceptProfile: { ok: a.ok, count: a.count, error: a.error ? 'present' : null },
-          dbSchemaAuth: { ok: b.ok, count: b.count, error: b.error ? 'present' : null },
+          authClient: { ok: results.authClient.ok, count: results.authClient.count, error: results.authClient.error || null },
+          rest: { ok: results.rest.ok, count: results.rest.count, error: results.rest.error || null },
+          succeeded: methodName,
         },
       });
     } catch (err) {

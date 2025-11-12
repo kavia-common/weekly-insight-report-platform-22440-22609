@@ -335,17 +335,19 @@ module.exports = {
       return { ok: false, status: 400, error: 'userId must be a valid UUID.' };
     }
     try {
-      // Prefer explicit auth client for reliability across Supabase versions
+      // Use authClient first with fallback handled in service
       const { exists, count, error, diag } = await supabaseService.authUsersExists(trimmed);
       if (error) {
+        // Surface exact error text without secrets
         return { ok: false, status: 400, error: `Unable to verify user in auth.users: ${error}`, diag: { ...diag, count } };
       }
-      // Include which mechanism is used in diagnostics for operators
+      // Include which method succeeded (authClient vs rest)
+      const mechanism = diag && diag.method ? (diag.method === 'rest' ? 'REST' : 'authClient') : 'authClient';
       return {
         ok: true,
         found: !!exists,
         count: typeof count === 'number' ? count : undefined,
-        diag: { ...diag, mechanism: 'db.schema(auth)' }
+        diag: { ...diag, mechanism }
       };
     } catch (err) {
       const norm = normalizeDbError(err);
