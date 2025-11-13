@@ -256,11 +256,24 @@ async function healthCheck() {
     });
 
     const okish = resp.status >= 200 && resp.status < 500;
+
+    // Optional deep check: attempt a no-op auth call guarded to avoid throwing
+    let authOk = false;
+    try {
+      const client = getClient();
+      // getSession is cheap and doesn't require a user to be logged in here
+      const s = await client.auth.getSession();
+      authOk = !s.error;
+    } catch {
+      authOk = false;
+    }
+
     return {
-      ok: okish,
+      ok: okish && authOk !== false,
       configured: true,
       status: resp.status,
       statusText: resp.statusText,
+      authOk,
       keySource,
     };
   } catch (err) {
